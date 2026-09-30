@@ -16,7 +16,6 @@ keywords:
   - iscsi
 maintainers:
   - name: delta-whiplash
-license: Apache-2.0
 annotations:
   artifacthub.io/license: Apache-2.0
   artifacthub.io/links: |
