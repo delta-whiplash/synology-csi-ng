@@ -6,9 +6,14 @@
 # -- Driver image (official upstream; pin digest: in production).
 # Fully qualified registry reference: CRI-O (OpenShift) enforces
 # short-name resolution policies that reject unqualified names.
+# Default targets THIS project's publication of the official upstream
+# v1.4.0 source (Synology released the code but never published an image —
+# their v1.4.0 Dockerfile requires RHEL entitlement). Built unmodified from
+# the upstream v1.4.0 tag by .github/workflows/build-driver.yml.
+# Fallback to the last official image: docker.io/synology/synology-csi + v1.3.1
 driver:
-  image: docker.io/synology/synology-csi
-  tag: v1.3.1            # latest published image (v1.4.0 pending publication)
+  image: ghcr.io/delta-whiplash/synology-csi
+  tag: v1.4.0
   digest: ""             # e.g. sha256:... — takes precedence over tag when set
   pullPolicy: IfNotPresent
 

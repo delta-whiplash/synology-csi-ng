@@ -55,7 +55,7 @@ Driver-level features ship when their PR merges upstream and an image is publish
 
 ## What this chart brings
 
-- **Official images only** — `synology/synology-csi` plus upstream `registry.k8s.io/sig-storage` sidecars, pin-able by tag or digest.
+- **Official code, minimal surface** — the chart deploys the official `synology/synology-csi` images by default. For driver releases Synology published without images (v1.4.0: their Dockerfile needs RHEL entitlement), CI builds the **unmodified upstream tag** and publishes it to this repo's GHCR. Everything is pin-able by tag or digest.
 - **Deployment profiles** — `--chroot-dir` / `--iscsiadm-path` / `--multipath-path` wired to values, with sane defaults for Talos and generic distros.
 - **Hardening by default** — non-root controller & snapshotter, dropped capabilities where the design allows, seccomp `RuntimeDefault`, read-only root filesystems where possible, documented exceptions for the privileged node plugin (CSI node plugins manage devices/mounts by design).
 - **Modern sidecars** — current `sig-storage` sidecar versions instead of the 2023-era ones pinned by older charts.
@@ -69,7 +69,7 @@ Driver-level features ship when their PR merges upstream and an image is publish
 | v1.1.3 | ✅ | works, legacy (pre `--chroot-dir` flag era: chart uses PATH-shim profile) |
 | v1.2.0 / v1.2.1 | ✅ | ✅ chart profile |
 | v1.3.0 / v1.3.1 | ✅ | ✅ chart profile — **recommended** |
-| v1.4.0 | ❌ not published to a registry yet | chart profile ready, image pending |
+| v1.4.0 | ⚠️ source released, **image never published** (upstream Dockerfile requires RHEL entitlement) | ✅ **chart default** — we build it unmodified from the upstream tag via CI ([ghcr.io/delta-whiplash/synology-csi](https://github.com/delta-whiplash/synology-csi-talos-ng/pkgs/container/synology-csi)) |
 
 | Platform | Status |
 |---|---|

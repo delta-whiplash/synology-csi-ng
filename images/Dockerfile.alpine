@@ -1,0 +1,42 @@
+# Builds the UNMODIFIED upstream synology-csi driver source with an Alpine
+# runtime — same tool set as the official v1.3.1 image (e2fsprogs, xfsprogs,
+# cifs-utils, nfs-utils, nvme-cli all available in Alpine repos), with
+# upstream v1.4.0's non-root default (USER 1000) preserved.
+#
+# Why not upstream's own v1.4.0 Dockerfile? It uses UBI9, whose free repos do
+# not carry e2fsprogs/xfsprogs/cifs-utils/nfs-utils — the build requires RHEL
+# entitlement (per the upstream Dockerfile's own comment), which is why no
+# v1.4.0 image was ever published. Driver CODE here is strictly the upstream
+# tag; nothing is patched.
+#
+# Build context: an upstream synology-csi checkout at the target tag
+# (see .github/workflows/build-driver.yml).
+FROM golang:1.21.4-alpine AS builder
+RUN apk add --no-cache alpine-sdk
+WORKDIR /go/src/synok8scsiplugin
+COPY go.mod go.sum ./
+RUN go mod download
+COPY Makefile .
+
+ARG TARGETPLATFORM
+
+COPY main.go .
+COPY pkg ./pkg
+COPY synocli ./synocli
+RUN env GOARCH=$(echo "$TARGETPLATFORM" | cut -f2 -d/) \
+        GOARM=$(echo "$TARGETPLATFORM" | cut -f3 -d/ | cut -c2-) \
+        make
+
+FROM alpine:3.20
+RUN apk add --no-cache \
+        e2fsprogs e2fsprogs-extra xfsprogs xfsprogs-extra blkid util-linux \
+        iproute2 bash ca-certificates cifs-utils nfs-utils nvme-cli
+
+COPY LICENSE /licenses/LICENSE
+WORKDIR /
+COPY --from=builder /go/src/synok8scsiplugin/bin/synology-csi-driver synology-csi-driver
+
+# Upstream v1.4.0 declares a non-root user; the node DaemonSet still runs
+# privileged with runAsUser: 0 (mount/iscsiadm need root).
+USER 1000
+ENTRYPOINT ["/synology-csi-driver"]
