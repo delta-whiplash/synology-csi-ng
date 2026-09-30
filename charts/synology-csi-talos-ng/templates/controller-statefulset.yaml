@@ -27,8 +27,8 @@ spec:
         - name: provisioner
           image: "{{ .Values.sidecars.provisioner.image }}:{{ .Values.sidecars.provisioner.tag }}"
           args:
+            # NB: pas de --feature-gate (supprimé du provisioner v5.x, Topology GA)
             - --csi-address=$(ADDRESS)
-            - --feature-gate=Topology=true
           env:
             - name: ADDRESS
               value: /csi/csi.sock
