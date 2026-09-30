@@ -1,0 +1,30 @@
+{{- range $name, $sc := .Values.storageClasses }}
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: {{ $name }}
+  annotations:
+    storageclass.kubernetes.io/is-default-class: {{ default "false" $sc.isDefault | quote }}
+  labels:
+    {{- include "synology-csi-talos-ng.labels" $ | nindent 4 }}
+provisioner: csi.san.synology.com
+reclaimPolicy: {{ default "Delete" $sc.reclaimPolicy }}
+volumeBindingMode: {{ default "Immediate" $sc.volumeBindingMode }}
+allowVolumeExpansion: true
+{{- with $sc.parameters }}
+parameters:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+---
+{{- end }}
+{{- range $name, $policy := .Values.volumeSnapshotClasses }}
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshotClass
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "synology-csi-talos-ng.labels" $ | nindent 4 }}
+driver: csi.san.synology.com
+deletionPolicy: {{ $policy }}
+---
+{{- end }}

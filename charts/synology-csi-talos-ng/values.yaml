@@ -1,0 +1,105 @@
+# Default values for synology-csi-talos-ng.
+# Deploy the OFFICIAL synology/synology-csi driver images with the
+# deployment configuration they need (chroot into the host, host binary
+# paths) — see README.md for the why.
+
+# -- Driver image (official upstream; pin digest: in production)
+driver:
+  image: synology/synology-csi
+  tag: v1.3.1            # latest published image (v1.4.0 pending publication)
+  digest: ""             # e.g. sha256:... — takes precedence over tag when set
+  pullPolicy: IfNotPresent
+
+# -- CSI sidecar images (registry.k8s.io/sig-storage)
+sidecars:
+  provisioner:
+    image: registry.k8s.io/sig-storage/csi-provisioner
+    tag: v5.2.0
+  attacher:
+    image: registry.k8s.io/sig-storage/csi-attacher
+    tag: v4.8.0
+  resizer:
+    image: registry.k8s.io/sig-storage/csi-resizer
+    tag: v1.13.1
+  registrar:
+    image: registry.k8s.io/sig-storage/csi-node-driver-registrar
+    tag: v2.13.0
+  snapshotter:
+    image: registry.k8s.io/sig-storage/csi-snapshotter
+    tag: v8.2.0
+
+# -- Host tool configuration: the whole point of this chart.
+# The driver chroots into the node filesystem to run iSCSI/multipath tools
+# from the HOST (the driver image intentionally does not ship them).
+hostTools:
+  # Host root mounted in the node plugin pod. Required when chrootDir != "".
+  hostRootPath: /
+  chrootDir: /host
+  # Explicit paths resolved INSIDE the chroot (host filesystem).
+  # Talos: /usr/local/sbin/iscsiadm (outside the driver's default search
+  # PATH resolution through `env`). Generic distros: leave empty — the
+  # driver's default search path covers /usr/sbin, /usr/bin, etc.
+  iscsiadmPath: ""
+  multipathPath: ""
+  multipathdPath: ""
+  nvmePath: ""
+
+# -- DSM credentials. Bring your own Secret (or SealedSecret) holding the
+# `client-info.yml` key; see upstream client-info-template.yml for the
+# schema (host/port/https/username/password, tlsCACert, insecureSkipVerify).
+clientInfoSecret:
+  create: false
+  name: synology-csi-credentials
+
+# -- StorageClasses to create (map name -> spec). Empty by default.
+# Example:
+# storageClasses:
+#   synology-iscsi:
+#     reclaimPolicy: Delete
+#     parameters:
+#       fsType: xfs
+#       location: /volume2
+storageClasses: {}
+
+# -- VolumeSnapshotClasses to create (map name -> deletionPolicy).
+volumeSnapshotClasses: {}
+
+controller:
+  replicaCount: 1
+  resources:
+    requests:
+      cpu: 25m
+      memory: 64Mi
+    limits:
+      memory: 256Mi
+
+node:
+  kubeletPath: /var/lib/kubelet
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+    limits:
+      memory: 128Mi
+  tolerations: []
+  nodeSelector: {}
+
+snapshotter:
+  enabled: true
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      memory: 128Mi
+
+# Namespace Pod Security: the node plugin is privileged by CSI design
+# (device nodes, mounts, chroot into the host). Controller and snapshotter
+# run hardened (non-root, no caps).
+podSecurity:
+  enforce: privileged
+  audit: privileged
+  warn: privileged
+
+nameOverride: ""
+fullnameOverride: ""

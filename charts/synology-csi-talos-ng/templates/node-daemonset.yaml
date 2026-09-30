@@ -1,0 +1,130 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "synology-csi-talos-ng.fullname" . }}-node
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "synology-csi-talos-ng.labels" . | nindent 4 }}
+    app.kubernetes.io/component: node
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "synology-csi-talos-ng.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: node
+  template:
+    metadata:
+      labels:
+        {{- include "synology-csi-talos-ng.labels" . | nindent 8 }}
+        app.kubernetes.io/component: node
+    spec:
+      serviceAccountName: {{ include "synology-csi-talos-ng.fullname" . }}-node
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: node-driver-registrar
+          image: "{{ .Values.sidecars.registrar.image }}:{{ .Values.sidecars.registrar.tag }}"
+          args:
+            - --csi-address=$(ADDRESS)
+            - --kubelet-registration-path={{ .Values.node.kubeletPath }}/plugins/csi.san.synology.com/csi.sock
+          env:
+            - name: ADDRESS
+              value: /csi/csi.sock
+            - name: KUBE_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          volumeMounts:
+            - name: plugin-dir
+              mountPath: /csi
+            - name: registration-dir
+              mountPath: /registration
+          resources:
+            {{- toYaml .Values.node.resources | nindent 12 }}
+        - name: csi-plugin
+          image: {{ include "synology-csi-talos-ng.driverImage" . }}
+          imagePullPolicy: {{ .Values.driver.pullPolicy }}
+          args:
+            - --client-info=/etc/synology/client-info.yml
+            - --endpoint=$(CSI_ENDPOINT)
+            - --log-level=info
+            - --nodeid=$(KUBE_NODE_NAME)
+            {{- /* The deployment-side fix that makes the official driver work
+               outside "standard" distros: chroot into the host filesystem and
+               resolve host tools from there. See README.md. */}}
+            - --chroot-dir={{ .Values.hostTools.chrootDir }}
+            {{- with .Values.hostTools.iscsiadmPath }}
+            - --iscsiadm-path={{ . }}
+            {{- end }}
+            {{- with .Values.hostTools.multipathPath }}
+            - --multipath-path={{ . }}
+            {{- end }}
+            {{- with .Values.hostTools.multipathdPath }}
+            - --multipathd-path={{ . }}
+            {{- end }}
+            {{- with .Values.hostTools.nvmePath }}
+            - --nvme-path={{ . }}
+            {{- end }}
+          env:
+            - name: CSI_ENDPOINT
+              value: unix:///csi/csi.sock
+            - name: KUBE_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          securityContext:
+            # Privileged by CSI node-plugin design: device nodes, filesystem
+            # mounts, and chroot into the host root. This is identical to
+            # every iSCSI CSI driver; do not "harden" it away.
+            privileged: true
+          volumeMounts:
+            - name: plugin-dir
+              mountPath: /csi
+            - name: client-info
+              mountPath: /etc/synology
+              readOnly: true
+            - name: device-dir
+              mountPath: /dev
+            - name: host-root
+              mountPath: {{ .Values.hostTools.chrootDir }}
+              readOnly: true
+            - name: kubelet-dir
+              mountPath: {{ .Values.node.kubeletPath }}
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            {{- toYaml .Values.node.resources | nindent 12 }}
+      volumes:
+        - name: client-info
+          secret:
+            secretName: {{ .Values.clientInfoSecret.name }}
+        - name: device-dir
+          hostPath:
+            path: /dev
+            type: Directory
+        - name: host-root
+          hostPath:
+            path: {{ .Values.hostTools.hostRootPath }}
+            type: Directory
+        - name: kubelet-dir
+          hostPath:
+            path: {{ .Values.node.kubeletPath }}
+            type: DirectoryOrCreate
+        - name: plugin-dir
+          hostPath:
+            path: {{ .Values.node.kubeletPath }}/plugins/csi.san.synology.com
+            type: DirectoryOrCreate
+        - name: registration-dir
+          hostPath:
+            path: {{ .Values.node.kubeletPath }}/plugins_registry
+            type: DirectoryOrCreate
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.node.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.node.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

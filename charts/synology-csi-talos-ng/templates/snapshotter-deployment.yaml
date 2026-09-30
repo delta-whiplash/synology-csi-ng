@@ -1,0 +1,68 @@
+{{- if .Values.snapshotter.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "synology-csi-talos-ng.fullname" . }}-snapshotter
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "synology-csi-talos-ng.labels" . | nindent 4 }}
+    app.kubernetes.io/component: snapshotter
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "synology-csi-talos-ng.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: snapshotter
+  template:
+    metadata:
+      labels:
+        {{- include "synology-csi-talos-ng.labels" . | nindent 8 }}
+        app.kubernetes.io/component: snapshotter
+    spec:
+      serviceAccountName: {{ include "synology-csi-talos-ng.fullname" . }}-snapshotter
+      containers:
+        - name: snapshotter
+          image: "{{ .Values.sidecars.snapshotter.image }}:{{ .Values.sidecars.snapshotter.tag }}"
+          args:
+            - --csi-address=$(ADDRESS)
+          env:
+            - name: ADDRESS
+              value: /csi/csi.sock
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+          resources:
+            {{- toYaml .Values.snapshotter.resources | nindent 12 }}
+        - name: csi-plugin
+          image: {{ include "synology-csi-talos-ng.driverImage" . }}
+          imagePullPolicy: {{ .Values.driver.pullPolicy }}
+          args:
+            - --client-info=/etc/synology/client-info.yml
+            - --endpoint=$(CSI_ENDPOINT)
+            - --log-level=info
+          env:
+            - name: CSI_ENDPOINT
+              value: unix:///csi/csi-snapshotter.sock
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+            - name: client-info
+              mountPath: /etc/synology
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          {{- include "synology-csi-talos-ng.hardenedSecurityContext" . | nindent 10 }}
+          resources:
+            {{- toYaml .Values.snapshotter.resources | nindent 12 }}
+      volumes:
+        - name: socket-dir
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+        - name: client-info
+          secret:
+            secretName: {{ .Values.clientInfoSecret.name }}
+{{- end }}

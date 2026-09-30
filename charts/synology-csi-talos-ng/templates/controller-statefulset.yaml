@@ -1,0 +1,93 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "synology-csi-talos-ng.fullname" . }}-controller
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "synology-csi-talos-ng.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+spec:
+  serviceName: {{ include "synology-csi-talos-ng.fullname" . }}-controller
+  replicas: {{ .Values.controller.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "synology-csi-talos-ng.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: controller
+  template:
+    metadata:
+      labels:
+        {{- include "synology-csi-talos-ng.labels" . | nindent 8 }}
+        app.kubernetes.io/component: controller
+    spec:
+      serviceAccountName: {{ include "synology-csi-talos-ng.fullname" . }}-controller
+      containers:
+        - name: provisioner
+          image: "{{ .Values.sidecars.provisioner.image }}:{{ .Values.sidecars.provisioner.tag }}"
+          args:
+            - --csi-address=$(ADDRESS)
+            - --feature-gate=Topology=true
+          env:
+            - name: ADDRESS
+              value: /csi/csi.sock
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+          resources:
+            {{- toYaml .Values.controller.resources | nindent 12 }}
+        - name: attacher
+          image: "{{ .Values.sidecars.attacher.image }}:{{ .Values.sidecars.attacher.tag }}"
+          args:
+            - --csi-address=$(ADDRESS)
+          env:
+            - name: ADDRESS
+              value: /csi/csi.sock
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+          resources:
+            {{- toYaml .Values.controller.resources | nindent 12 }}
+        - name: resizer
+          image: "{{ .Values.sidecars.resizer.image }}:{{ .Values.sidecars.resizer.tag }}"
+          args:
+            - --csi-address=$(ADDRESS)
+          env:
+            - name: ADDRESS
+              value: /csi/csi.sock
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+          resources:
+            {{- toYaml .Values.controller.resources | nindent 12 }}
+        - name: csi-plugin
+          image: {{ include "synology-csi-talos-ng.driverImage" . }}
+          imagePullPolicy: {{ .Values.driver.pullPolicy }}
+          args:
+            - --client-info=/etc/synology/client-info.yml
+            - --endpoint=$(CSI_ENDPOINT)
+            - --log-level=info
+          env:
+            - name: CSI_ENDPOINT
+              value: unix:///csi/csi.sock
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+            - name: client-info
+              mountPath: /etc/synology
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          {{- include "synology-csi-talos-ng.hardenedSecurityContext" . | nindent 10 }}
+          resources:
+            {{- toYaml .Values.controller.resources | nindent 12 }}
+      volumes:
+        - name: socket-dir
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+        - name: client-info
+          secret:
+            secretName: {{ .Values.clientInfoSecret.name }}
+        - name: client-info
+          secret:
+            secretName: {{ .Values.clientInfoSecret.name }}

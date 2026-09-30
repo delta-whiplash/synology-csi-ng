@@ -1,0 +1,14 @@
+synology-csi-talos-ng
+Copyright 2026 the synology-csi-talos-ng authors
+
+This product includes software developed by Synology Inc.
+(https://github.com/SynologyOpenSource/synology-csi), licensed under the
+Apache License 2.0. The Helm chart in this repository is a deployment
+configuration for unmodified upstream driver images; it contains no
+driver code changes.
+
+It also builds upon the debugging work of the community, notably
+zebernst/synology-csi-talos (Apache-2.0).
+
+CSI sidecar images are provided by the Kubernetes SIG-Storage project
+(registry.k8s.io/sig-storage), Apache-2.0.
