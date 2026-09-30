@@ -25,11 +25,33 @@ We reproduced this three times on 2026-09-30 (official v1.3.1, a community fork,
 
 1. The driver runs host binaries through a **chroot** (`pkg/utils/hostexec/hostexec.go`), controlled by a `--chroot-dir` flag that **defaults to empty** ("empty disables chroot").
 2. With chroot disabled, `iscsiadm` is looked up **inside the container** — and the official image does not ship it (it's meant to come from the host).
-3. Nobody's chart passes `--chroot-dir=/host`. The historical workaround (v1.1.3's own `/csibin` PATH shims, and community forks of it) worked around this by other means, and stopped working when the code switched to explicit paths in v1.2.1.
+3. The driver resolves commands through `chroot /host /usr/bin/env -i PATH=… <tool>` — and **Talos ships no `/usr/bin/env`** (verified: `lstat /usr/bin/env: no such file or directory`). So even charts that set `--chroot-dir=/host` (including the official `deploy/helm` chart in upstream main today) still fail on Talos: the `env` half of the resolution cannot run.
+4. The fix that works everywhere: map the host tool explicitly with `--iscsiadm-path` — the driver skips the `env` wrapper entirely for mapped paths (they contain `/`), so host `env` is never needed.
 
-With `--chroot-dir=/host` (+ the `/host` hostPath mount every chart already ships) and, on Talos, `--iscsiadm-path=/usr/local/sbin/iscsiadm` (its `iscsiadm` lives outside the driver's default search PATH semantics), the **unmodified official image works perfectly** — validated end to end: LUN provisioning, mounting, and cross-node pod rescheduling.
+With `--chroot-dir=/host` (+ the `/host` hostPath mount every chart already ships) and `--iscsiadm-path=/usr/local/sbin/iscsiadm` on Talos, the **unmodified official image works perfectly** — validated end to end: LUN provisioning, mounting, and cross-node pod rescheduling.
 
 Full debugging story and evidence: see [`docs/TESTING.md`](docs/TESTING.md).
+
+## Community PRs we track
+
+The upstream queue is full of good ideas that have been waiting for years. This project integrates what is integrable at the chart level and tracks the driver-level ones:
+
+| Upstream PR | Idea | Status here |
+|---|---|---|
+| [#130](https://github.com/SynologyOpenSource/synology-csi/pull/130) | Talos chroot fix (resolve tools when host has no `/usr/bin/env`) | validated diagnosis independently; supported upstream — our `--iscsiadm-path` mapping achieves the same on released images today |
+| [#129](https://github.com/SynologyOpenSource/synology-csi/pull/129) | Fully-qualified image refs (CRI-O / OpenShift short-name mode) | ✅ **adopted** (default image is `docker.io/synology/synology-csi`) |
+| [#118](https://github.com/SynologyOpenSource/synology-csi/pull/118) / upstream main | Helm chart incl. opt-in inline `client-info` Secret | ✅ **adopted** (`clientInfoSecret.create=true` + `clients[]`, with `tlsCACert` / `insecureSkipVerify` passthrough); BYO-secret remains the default for GitOps |
+| [#40](https://github.com/SynologyOpenSource/synology-csi/pull/40) | Community Helm chart | patterns merged (per-component RBAC, snapshot classes) |
+| [#148](https://github.com/SynologyOpenSource/synology-csi/pull/148) | Retry DSM login instead of serving with no DSM registered | tracked — resilience fix (boot ordering) |
+| [#147](https://github.com/SynologyOpenSource/synology-csi/pull/147) / [#116](https://github.com/SynologyOpenSource/synology-csi/pull/116) | Go toolchain + dependency CVE bumps | tracked — supports any future image rebuild |
+| [#142](https://github.com/SynologyOpenSource/synology-csi/pull/142) | `nfsClientAllowlist` StorageClass parameter | tracked — documented in chart values once released in an image |
+| [#140](https://github.com/SynologyOpenSource/synology-csi/pull/140) | NFS 2370 retry + provisioning race mutex | tracked |
+| [#132](https://github.com/SynologyOpenSource/synology-csi/pull/132) | iSCSI target interface binding | tracked |
+| [#127](https://github.com/SynologyOpenSource/synology-csi/pull/127) | `allowMultipleSessions` StorageClass parameter | tracked |
+| [#104](https://github.com/SynologyOpenSource/synology-csi/pull/104) | Normalize requested capacity to Synology minimum | tracked |
+| [#96](https://github.com/SynologyOpenSource/synology-csi/pull/96) / [#75](https://github.com/SynologyOpenSource/synology-csi/pull/75) / [#48](https://github.com/SynologyOpenSource/synology-csi/pull/48) | PVC-named shares, devAttribs, extra LUN info | tracked |
+
+Driver-level features ship when their PR merges upstream and an image is published — this chart deliberately does not fork images.
 
 ## What this chart brings
 

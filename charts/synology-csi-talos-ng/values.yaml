@@ -3,9 +3,11 @@
 # deployment configuration they need (chroot into the host, host binary
 # paths) — see README.md for the why.
 
-# -- Driver image (official upstream; pin digest: in production)
+# -- Driver image (official upstream; pin digest: in production).
+# Fully qualified registry reference: CRI-O (OpenShift) enforces
+# short-name resolution policies that reject unqualified names.
 driver:
-  image: synology/synology-csi
+  image: docker.io/synology/synology-csi
   tag: v1.3.1            # latest published image (v1.4.0 pending publication)
   digest: ""             # e.g. sha256:... — takes precedence over tag when set
   pullPolicy: IfNotPresent
@@ -44,12 +46,27 @@ hostTools:
   multipathdPath: ""
   nvmePath: ""
 
-# -- DSM credentials. Bring your own Secret (or SealedSecret) holding the
-# `client-info.yml` key; see upstream client-info-template.yml for the
-# schema (host/port/https/username/password, tlsCACert, insecureSkipVerify).
+# -- DSM credentials. Default: bring your own Secret (or SealedSecret for
+# GitOps) holding the `client-info.yml` key; see upstream
+# client-info-template.yml for the schema.
+# Alternatively set `create: true` and fill `clients` to have the chart
+# render the Secret — convenient for non-GitOps setups; prefer sealed
+# secrets otherwise (plaintext DSM credentials in values otherwise).
 clientInfoSecret:
   create: false
-  name: synology-csi-credentials
+  name: synology-csi-credentials   # Secret name (created or referenced)
+  clients: []
+  #  - host: 192.168.1.10
+  #    port: 5001
+  #    https: true
+  #    username: csi
+  #    password: ""
+  #    # tlsCACert: |
+  #    #   -----BEGIN CERTIFICATE-----
+  #    #   ...
+  #    #   -----END CERTIFICATE-----
+  #    # tlsServerName: ""          # override when connecting by IP
+  #    # insecureSkipVerify: false  # last resort; prefer tlsCACert
 
 # -- StorageClasses to create (map name -> spec). Empty by default.
 # Example:

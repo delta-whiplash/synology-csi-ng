@@ -28,6 +28,16 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end -}}
 {{- end }}
 
+{{/* Name of the Secret holding client-info.yml — either user-provided or
+chart-rendered (clientInfoSecret.create=true). */}}
+{{- define "synology-csi-talos-ng.clientInfoSecretName" -}}
+{{- if .Values.clientInfoSecret.create -}}
+{{ include "synology-csi-talos-ng.fullname" . }}-client-info
+{{- else -}}
+{{ required "clientInfoSecret.name is required when create=false" .Values.clientInfoSecret.name }}
+{{- end -}}
+{{- end }}
+
 {{/* Container hardening: everything that runs in userland without host
 access runs non-root with dropped caps. NOT applied to the node plugin
 (privileged by CSI design — device nodes, mounts, chroot). */}}

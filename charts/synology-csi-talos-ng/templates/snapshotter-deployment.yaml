@@ -64,5 +64,5 @@ spec:
           emptyDir: {}
         - name: client-info
           secret:
-            secretName: {{ .Values.clientInfoSecret.name }}
+            secretName: {{ include "synology-csi-talos-ng.clientInfoSecretName" . }}
 {{- end }}
