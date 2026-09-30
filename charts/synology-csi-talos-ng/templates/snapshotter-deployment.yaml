@@ -30,7 +30,8 @@ spec:
             - --csi-address=$(ADDRESS)
           env:
             - name: ADDRESS
-              value: /csi/csi.sock
+              # Socket dédiée du driver en mode snapshotter (PAS csi.sock)
+              value: /csi/csi-snapshotter.sock
           volumeMounts:
             - name: socket-dir
               mountPath: /csi
