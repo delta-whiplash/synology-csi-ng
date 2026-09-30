@@ -76,7 +76,12 @@ spec:
             # Privileged by CSI node-plugin design: device nodes, filesystem
             # mounts, and chroot into the host root. This is identical to
             # every iSCSI CSI driver; do not "harden" it away.
+            # runAsUser 0 REQUIRED: the v1.4.0 image defaults to USER 1000
+            # and must manage root-owned sockets on the kubelet hostPath
+            # (observed: "remove /csi/csi.sock: permission denied").
             privileged: true
+            runAsUser: 0
+            runAsGroup: 0
           volumeMounts:
             - name: plugin-dir
               mountPath: /csi

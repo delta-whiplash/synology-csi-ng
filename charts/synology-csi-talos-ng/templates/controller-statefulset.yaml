@@ -20,6 +20,8 @@ spec:
         {{- include "synology-csi-talos-ng.labels" . | nindent 8 }}
         app.kubernetes.io/component: controller
     spec:
+      securityContext:
+        fsGroup: 65534
       serviceAccountName: {{ include "synology-csi-talos-ng.fullname" . }}-controller
       containers:
         - name: provisioner

@@ -22,6 +22,8 @@ spec:
         {{- include "synology-csi-talos-ng.labels" . | nindent 8 }}
         app.kubernetes.io/component: snapshotter
     spec:
+      securityContext:
+        fsGroup: 65534
       serviceAccountName: {{ include "synology-csi-talos-ng.fullname" . }}-snapshotter
       containers:
         - name: snapshotter
