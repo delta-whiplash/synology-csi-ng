@@ -1,0 +1,25 @@
+# Headless Service backing the controller StatefulSet. The StatefulSet's
+# spec.serviceName references this resource; clients do not talk to it
+# (the controller is reached through the CSI socket on the pod), but the
+# field is mandatory and the Service gives the pod a stable DNS identity.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "synology-csi-ng.fullname" . }}-controller
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "synology-csi-ng.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+spec:
+  type: ClusterIP
+  clusterIP: None
+  publishNotReadyAddresses: false
+  selector:
+    app.kubernetes.io/name: {{ include "synology-csi-ng.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: controller
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
