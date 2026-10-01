@@ -13,13 +13,7 @@ metadata:
 spec:
   type: ClusterIP
   clusterIP: None
-  publishNotReadyAddresses: false
   selector:
     app.kubernetes.io/name: {{ include "synology-csi-ng.name" . }}
     app.kubernetes.io/instance: {{ .Release.Name }}
     app.kubernetes.io/component: controller
-  ports:
-    - name: http
-      port: 8080
-      targetPort: 8080
-      protocol: TCP
