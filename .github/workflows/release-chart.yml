@@ -36,6 +36,8 @@ jobs:
             echo "::error::tag chart-v${TAG} does not match Chart.yaml version ${CHART_VERSION}"
             exit 1
           fi
+          echo "CHART_VERSION=$CHART_VERSION" >> "$GITHUB_ENV"
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
 
       - name: Login to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
@@ -54,7 +56,18 @@ jobs:
           # Pull the existing index so `helm repo index --merge` appends to
           # it rather than replacing it — otherwise every release wipes the
           # history and older chart versions become unreachable.
-          curl -fsSL https://delta-whiplash.github.io/synology-csi-ng/index.yaml -o /tmp/chart-repo/index.yaml || true
+          #
+          # Hard-fail when prior releases exist: if older chart-v* tags are
+          # present but the remote index.yaml is unreachable, that is a
+          # real problem (data loss in waiting) and must surface as a
+          # workflow failure, not a silent fresh index. The || true path
+          # is only acceptable on a first-ever release (no prior tags).
+          prior_tags=$(git tag -l 'chart-v*' | grep -v "^chart-v${TAG}$" || true)
+          if [ -n "$prior_tags" ]; then
+            curl -fsSL https://delta-whiplash.github.io/synology-csi-ng/index.yaml -o /tmp/chart-repo/index.yaml
+          else
+            curl -fsSL https://delta-whiplash.github.io/synology-csi-ng/index.yaml -o /tmp/chart-repo/index.yaml || true
+          fi
           helm repo index /tmp/chart-repo --merge /tmp/chart-repo/index.yaml --url https://${{ github.repository_owner }}.github.io/$(basename ${{ github.repository }})
           git fetch origin gh-pages || git checkout --orphan gh-pages
           git checkout gh-pages 2>/dev/null || git checkout -b gh-pages
