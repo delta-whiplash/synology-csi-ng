@@ -1,0 +1,291 @@
+diff --git a/pkg/driver/nfs_root_squash_test.go b/pkg/driver/nfs_root_squash_test.go
+new file mode 100644
+index 0000000..76f707d
+--- /dev/null
++++ b/pkg/driver/nfs_root_squash_test.go
+@@ -0,0 +1,61 @@
++// Copyright 2021 Synology Inc.
++
++package driver
++
++import "testing"
++
++// nfsRootSquashValue is the pure function under test. It does not exist yet in
++// the production code — this is the deliberate RED of TDD. The implementation
++// step will introduce it in nfs_utils.go (or a sibling file) with the
++// signature below: reads CSI_NFS_ROOT_SQUASH via os.LookupEnv each call (so
++// t.Setenv is observed), returns "root" when the env var is absent, and the
++// env value when it is present (even when empty).
++//
++// Until then this file does not compile, which is the desired red state.
++
++func TestNfsRootSquashValue_EnvAbsentReturnsRoot(t *testing.T) {
++	// Do NOT touch CSI_NFS_ROOT_SQUASH — assume a clean environment.
++	// t.Setenv guarantees cleanup between tests, so prior tests in this file
++	// leave the variable unset by the time this one runs. If the user's own
++	// shell has CSI_NFS_ROOT_SQUASH set, this test correctly surfaces that
++	// the function sees the user's value rather than the default.
++	got := nfsRootSquashValue()
++	if got != "root" {
++		t.Errorf("nfsRootSquashValue() with env absent = %q, want %q", got, "root")
++	}
++}
++
++func TestNfsRootSquashValue_EnvPresentUsesValue(t *testing.T) {
++	t.Setenv("CSI_NFS_ROOT_SQUASH", "all")
++	got := nfsRootSquashValue()
++	if got != "all" {
++		t.Errorf("nfsRootSquashValue() with env=\"all\" = %q, want %q", got, "all")
++	}
++}
++
++func TestNfsRootSquashValue_EnvPresentButEmptyUsesEmpty(t *testing.T) {
++	// Explicit empty string must be honored — "present" is what matters, not
++	// "non-empty". Operators may want to disable squashing entirely by
++	// setting CSI_NFS_ROOT_SQUASH="".
++	t.Setenv("CSI_NFS_ROOT_SQUASH", "")
++	got := nfsRootSquashValue()
++	if got != "" {
++		t.Errorf("nfsRootSquashValue() with env=\"\" = %q, want %q", got, "")
++	}
++}
++
++func TestNfsRootSquashValue_EnvReadOnEachCall(t *testing.T) {
++	// The ask: "lue via os.LookupEnv à chaque appel — pas à l'init, pour
++	// être testable avec t.Setenv". Flipping the env between calls must
++	// change the answer, which would not be the case if the value were
++	// captured once at package init.
++	t.Setenv("CSI_NFS_ROOT_SQUASH", "first")
++	if got := nfsRootSquashValue(); got != "first" {
++		t.Fatalf("first call = %q, want %q", got, "first")
++	}
++
++	t.Setenv("CSI_NFS_ROOT_SQUASH", "second")
++	if got := nfsRootSquashValue(); got != "second" {
++		t.Fatalf("second call after env change = %q, want %q", got, "second")
++	}
++}
+diff --git a/pkg/driver/nfs_utils.go b/pkg/driver/nfs_utils.go
+index 46f45b8..5c98d44 100644
+--- a/pkg/driver/nfs_utils.go
++++ b/pkg/driver/nfs_utils.go
+@@ -22,6 +22,19 @@ import (
+ 	log "github.com/sirupsen/logrus"
+ )
+ 
++// nfsRootSquashValue returns the NFS RootSquash value to send in privilege
++// rules. It reads CSI_NFS_ROOT_SQUASH via os.LookupEnv on every call (not
++// cached at init) so that t.Setenv and runtime env changes are observed.
++// When the variable is absent, the upstream default "root" is returned.
++// When the variable is present — even if empty — its value is returned as-is,
++// letting operators override (or disable) root squashing without a rebuild.
++func nfsRootSquashValue() string {
++	if v, ok := os.LookupEnv("CSI_NFS_ROOT_SQUASH"); ok {
++		return v
++	}
++	return "root"
++}
++
+ // mountPermissionsFor works out what to chmod a freshly mounted volume root to,
+ // given what the StorageClass asked for and what is already there.
+ //
+diff --git a/pkg/driver/nodeserver.go b/pkg/driver/nodeserver.go
+index 5e03b17..047189d 100644
+--- a/pkg/driver/nodeserver.go
++++ b/pkg/driver/nodeserver.go
+@@ -457,7 +457,7 @@ func (ns *nodeServer) setNFSVolumePrivilege(sourcePath string, hostnames []strin
+ 			Crossmnt:   true,
+ 			Insecure:   true,
+ 			Privilege:  string(authType),
+-			RootSquash: "root",
++			RootSquash: nfsRootSquashValue(),
+ 			SecurityFlavor: webapi.SecurityFlavor{
+ 				Kerbros:          false,
+ 				KerbrosIntegrity: false,
+diff --git a/pkg/dsm/webapi/share.go b/pkg/dsm/webapi/share.go
+index 2411d1c..17272c1 100644
+--- a/pkg/dsm/webapi/share.go
++++ b/pkg/dsm/webapi/share.go
+@@ -10,31 +10,31 @@ import (
+ 	"strconv"
+ 	"time"
+ 
+-	log "github.com/sirupsen/logrus"
+-	"github.com/SynologyOpenSource/synology-csi/pkg/utils"
+ 	"github.com/SynologyOpenSource/synology-csi/pkg/logger"
++	"github.com/SynologyOpenSource/synology-csi/pkg/utils"
+ 	"github.com/cenkalti/backoff/v4"
++	log "github.com/sirupsen/logrus"
+ )
+ 
+ type ShareInfo struct {
+-	Name                string `json:"name"`                        // required
+-	VolPath             string `json:"vol_path"`                    // required
++	Name                string `json:"name"`     // required
++	VolPath             string `json:"vol_path"` // required
+ 	Desc                string `json:"desc"`
+-	EnableShareCow      bool   `json:"enable_share_cow"`            // field for create
++	EnableShareCow      bool   `json:"enable_share_cow"` // field for create
+ 	EnableRecycleBin    bool   `json:"enable_recycle_bin"`
+ 	RecycleBinAdminOnly bool   `json:"recycle_bin_admin_only"`
+-	Encryption          int    `json:"encryption"`                  // field for create
++	Encryption          int    `json:"encryption"` // field for create
+ 	QuotaForCreate      *int64 `json:"share_quota,omitempty"`
+-	QuotaValueInMB      int64  `json:"quota_value"`                 // field for get
+-	SupportSnapshot     bool   `json:"support_snapshot"`            // field for get
+-	Uuid                string `json:"uuid"`                        // field for get
+-	NameOrg             string `json:"name_org"`                    // required for clone
++	QuotaValueInMB      int64  `json:"quota_value"`      // field for get
++	SupportSnapshot     bool   `json:"support_snapshot"` // field for get
++	Uuid                string `json:"uuid"`             // field for get
++	NameOrg             string `json:"name_org"`         // required for clone
+ }
+ 
+ type ShareUpdateInfo struct {
+-	Name                string `json:"name"`                        // required
+-	VolPath             string `json:"vol_path"`                    // required
+-	QuotaForCreate      *int64 `json:"share_quota,omitempty"`
++	Name           string `json:"name"`     // required
++	VolPath        string `json:"vol_path"` // required
++	QuotaForCreate *int64 `json:"share_quota,omitempty"`
+ 	// Add properties you want to update to shares here
+ }
+ 
+@@ -66,7 +66,7 @@ type ShareSnapshotCreateSpec struct {
+ 
+ type SharePermissionSetSpec struct {
+ 	Name          string
+-	UserGroupType string            // "local_user"/"local_group"/"system"
++	UserGroupType string // "local_user"/"local_group"/"system"
+ 	Permissions   []*SharePermission
+ }
+ 
+@@ -499,9 +499,12 @@ func (dsm *DSM) ShareNfsPrivilegeSave(privilege SharePrivilege) error {
+ 	attempts := 0
+ 	return backoff.Retry(func() error {
+ 		attempts++
+-		if err := dsm.shareNfsPrivilegeSaveOnce(privilege); err != nil {
+-			// nfsPrivilegeRequest has already retried what is worth retrying at
+-			// the request level; anything left is the caller's problem.
++		// Save the rules, retrying briefly when DSM answers 2370 (transient
++		// "share privilege is being configured" / busy state). Cap 5 attempts,
++		// 2s constant backoff — on top of the per-request retry already
++		// performed by nfsPrivilegeRequest. Any other error is permanent for
++		// this iteration.
++		if err := dsm.saveNfsPrivilegeWith2370Retry(privilege); err != nil {
+ 			return backoff.Permanent(err)
+ 		}
+ 
+@@ -529,7 +532,27 @@ func (dsm *DSM) ShareNfsPrivilegeSave(privilege SharePrivilege) error {
+ 	}, busyBackOff(nfsPrivilegeVerifyTimeout))
+ }
+ 
+-func (dsm *DSM) shareNfsPrivilegeSaveOnce(privilege SharePrivilege) error {
++// saveNfsPrivilegeWith2370Retry wraps shareNfsPrivilegeSaveOnce with a retry
++// loop that specifically handles DSM error 2370: up to 5 attempts, 2s constant
++// backoff between them. Any other error is permanent and returned immediately.
++func (dsm *DSM) saveNfsPrivilegeWith2370Retry(privilege SharePrivilege) error {
++	const nfsPrivilege2370MaxAttempts = 5
++	b := backoff.WithMaxRetries(backoff.NewConstantBackOff(2*time.Second), nfsPrivilege2370MaxAttempts)
++	return backoff.Retry(func() error {
++		code, err := dsm.shareNfsPrivilegeSaveOnce(privilege)
++		if err == nil {
++			return nil
++		}
++		if code == nfsPrivilegeShareLoadFailErrCode {
++			log.Infof("DSM[%s] save of NFS privilege for share(%s) returned error %d, retrying",
++				dsm.Ip, privilege.ShareName, code)
++			return err
++		}
++		return backoff.Permanent(err)
++	}, b)
++}
++
++func (dsm *DSM) shareNfsPrivilegeSaveOnce(privilege SharePrivilege) (int, error) {
+ 	params := url.Values{}
+ 	params.Add("api", "SYNO.Core.FileServ.NFS.SharePrivilege")
+ 	params.Add("method", "save")
+@@ -538,16 +561,16 @@ func (dsm *DSM) shareNfsPrivilegeSaveOnce(privilege SharePrivilege) error {
+ 
+ 	js, err := json.Marshal(privilege.Rule)
+ 	if err != nil {
+-		return err
++		return 0, err
+ 	}
+ 	params.Add("rule", string(js))
+ 
+-	_, err = dsm.nfsPrivilegeRequest(&struct{}{}, params, nfsPrivilegeRetryTimeout)
++	resp, err := dsm.nfsPrivilegeRequest(&struct{}{}, params, nfsPrivilegeRetryTimeout)
+ 	if err != nil {
+-		return err
++		return resp.ErrorCode, err
+ 	}
+ 
+-	return nil
++	return 0, nil
+ }
+ 
+ // missingPrivilegeRules returns the clients we asked to allow that DSM does not
+@@ -622,4 +645,3 @@ func (dsm *DSM) NfsSet(enableV3 bool, enableV4 bool, enabledMinorVer int) error
+ 
+ 	return nil
+ }
+-
+diff --git a/pkg/dsm/webapi/share_privilege_verify_test.go b/pkg/dsm/webapi/share_privilege_verify_test.go
+index c2a22fa..aa5c5c1 100644
+--- a/pkg/dsm/webapi/share_privilege_verify_test.go
++++ b/pkg/dsm/webapi/share_privilege_verify_test.go
+@@ -28,6 +28,10 @@ type privilegeDSM struct {
+ 	// 2370 is retried inside nfsPrivilegeRequest, so a test that wants the
+ 	// read-back to actually fail has to use a code that is not.
+ 	loadErrCode int
++	// saveErrUntil is the number of save attempts that return saveErrCode
++	// before succeeding. Used to simulate DSM error 2370 on the save path.
++	saveErrUntil int
++	saveErrCode  int
+ }
+ 
+ func (f *privilegeDSM) handler(w http.ResponseWriter, r *http.Request) {
+@@ -45,6 +49,12 @@ func (f *privilegeDSM) handler(w http.ResponseWriter, r *http.Request) {
+ 	switch q.Get("method") {
+ 	case "save":
+ 		f.saves++
++		// Return an explicit DSM error on the first saveErrUntil attempts
++		// (used to simulate error 2370 which must be retried).
++		if f.saves <= f.saveErrUntil {
++			w.Write([]byte(`{"success":false,"error":{"code":` + strconv.Itoa(f.saveErrCode) + `}}`))
++			return
++		}
+ 		if f.saves > f.applyAfter {
+ 			var rules []PrivilegeRule
+ 			if err := json.Unmarshal([]byte(q.Get("rule")), &rules); err != nil {
+@@ -257,3 +267,29 @@ func TestVerifyBudgetLeavesRoomForTheMount(t *testing.T) {
+ 			nfsPrivilegeVerifyTimeout, nfsPrivilegeRetryTimeout)
+ 	}
+ }
++
++// DSM can transiently answer 2370 on the save path ("NFS share privilege is
++// being configured" or similar transient busy state). Today nfsPrivilegeRequest
++// only retries nfsPrivilegeShareLoadFailErrCode on the load path; 2370 on save
++// surfaces as a hard failure and the pod is stuck. The fix is to retry 2370
++// with a short backoff (cap 5 attempts). This test asserts that retry
++// behaviour: the first save returns 2370, the second succeeds, and the caller
++// observes success. Today it FAILS because 2370 is not retried on save —
++// that is the deliberate RED.
++func TestSharePrivilegeSaveRetriesOn2370(t *testing.T) {
++	withShortVerifyBudget(t, 5*time.Second)
++
++	fake := &privilegeDSM{
++		saveErrUntil: 1,    // first save returns the error
++		saveErrCode:  2370, // the specific DSM code we need retried
++	}
++	dsm, done := newPrivilegeDSM(t, fake)
++	defer done()
++
++	if err := dsm.ShareNfsPrivilegeSave(wantPrivilege()); err != nil {
++		t.Fatalf("expected the save to succeed after retrying 2370, got %v", err)
++	}
++	if fake.saves < 2 {
++		t.Errorf("expected at least 2 save attempts (1 x 2370 + 1 success), got %d", fake.saves)
++	}
++}
