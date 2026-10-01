@@ -62,7 +62,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          patch_dir="patches/${UPSTREAM_REF_VALIDATED}"
+          patch_dir="$GITHUB_WORKSPACE/patches/${UPSTREAM_REF_VALIDATED}"
           if [ ! -d "$patch_dir" ]; then
             echo "No patches directory at $patch_dir — building vanilla upstream."
             exit 0
@@ -76,7 +76,7 @@ jobs:
           echo "Applying ${#patches[@]} patch(es) from $patch_dir to upstream/:"
           for p in "${patches[@]}"; do
             echo "  - $(basename "$p")"
-            git -C upstream apply "$p"
+            git -C "$GITHUB_WORKSPACE/upstream" apply "$p"
           done
         env:
           UPSTREAM_REF_VALIDATED: ${{ env.UPSTREAM_REF_VALIDATED }}
