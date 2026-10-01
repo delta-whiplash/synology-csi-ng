@@ -1,6 +1,6 @@
 apiVersion: v1
 entries:
-  synology-csi-talos-ng:
+  synology-csi-ng:
   - annotations:
       artifacthub.io/license: Apache-2.0
       artifacthub.io/links: |
@@ -8,11 +8,11 @@ entries:
           url: https://github.com/SynologyOpenSource/synology-csi
     apiVersion: v2
     appVersion: v1.4.0
-    created: "2026-09-30T23:14:02.162608381Z"
+    created: "2026-10-01T11:43:35.353294829Z"
     description: Hardened Helm chart for the official Synology CSI driver — works
       on Talos Linux, k3s, OpenShift and kubeadm clusters.
-    digest: 4d5f83e73083a8e65bb5411bb728311391f0927942b1e2d03bc6b0f59ba07082
-    home: https://github.com/delta-whiplash/synology-csi-talos-ng
+    digest: 6375891bceda13a77eb418be0d1322b8ef7382cc9b57b682746b08760b3a50a3
+    home: https://github.com/delta-whiplash/synology-csi-ng
     keywords:
     - csi
     - synology
@@ -21,12 +21,12 @@ entries:
     - iscsi
     maintainers:
     - name: delta-whiplash
-    name: synology-csi-talos-ng
+    name: synology-csi-ng
     sources:
-    - https://github.com/delta-whiplash/synology-csi-talos-ng
+    - https://github.com/delta-whiplash/synology-csi-ng
     - https://github.com/SynologyOpenSource/synology-csi
     type: application
     urls:
-    - https://delta-whiplash.github.io/synology-csi-talos-ng/synology-csi-talos-ng-0.2.3.tgz
-    version: 0.2.3
-generated: "2026-09-30T23:14:02.161971939Z"
+    - https://delta-whiplash.github.io/synology-csi-ng/synology-csi-ng-0.3.0.tgz
+    version: 0.3.0
+generated: "2026-10-01T11:43:35.352294655Z"
