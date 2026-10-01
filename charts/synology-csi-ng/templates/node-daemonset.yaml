@@ -39,6 +39,15 @@ spec:
               mountPath: /csi
             - name: registration-dir
               mountPath: /registration
+          securityContext:
+            # node-driver-registrar writes the registration socket into a
+            # hostPath directory owned by root → must stay root. Drop caps
+            # and lock the seccomp profile like every other container.
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
           resources:
             {{- toYaml .Values.node.resources | nindent 12 }}
         - name: csi-plugin
