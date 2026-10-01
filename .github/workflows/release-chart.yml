@@ -37,7 +37,11 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           mkdir -p /tmp/chart-repo && helm package charts/synology-csi-ng --destination /tmp/chart-repo
-          helm repo index /tmp/chart-repo --url https://${{ github.repository_owner }}.github.io/$(basename ${{ github.repository }})
+          # Pull the existing index so `helm repo index --merge` appends to
+          # it rather than replacing it — otherwise every release wipes the
+          # history and older chart versions become unreachable.
+          curl -fsSL https://delta-whiplash.github.io/synology-csi-ng/index.yaml -o /tmp/chart-repo/index.yaml || true
+          helm repo index /tmp/chart-repo --merge /tmp/chart-repo/index.yaml --url https://${{ github.repository_owner }}.github.io/$(basename ${{ github.repository }})
           git fetch origin gh-pages || git checkout --orphan gh-pages
           git checkout gh-pages 2>/dev/null || git checkout -b gh-pages
           cp -f /tmp/chart-repo/*.tgz . 2>/dev/null || true
