@@ -21,7 +21,7 @@ The driver has three layers that must be upgraded in sequence:
 # 1. Check current version
 helm list -n synology-csi
 # NAME          NAMESPACE       REVISION  STATUS    CHART                      APP VERSION
-# synology-csi  synology-csi    5         deployed  synology-csi-ng-1.4.0      v1.4.0
+# synology-csi  synology-csi    5         deployed  synology-csi-ng-0.5.0      v1.4.0
 
 # 2. Pull the new chart version
 helm repo update synology-csi-ng
@@ -35,13 +35,13 @@ helm upgrade synology-csi synology-csi-ng/synology-csi-ng \
   --timeout 10m
 
 # 4. Gate: verify the controller is healthy
-kubectl -n synology-csi rollout status deployment/synology-csi-controller
-kubectl -n synology-csi get pods -l app=synology-csi-controller
-# All pods should be Running, with 6/6 or 7/7 containers ready (depending on version)
+kubectl -n synology-csi rollout status statefulset/synology-csi-ng-controller
+kubectl -n synology-csi get pods -l app.kubernetes.io/name=synology-csi-ng,app.kubernetes.io/component=controller
+# All pods should be Running, with 4/4 containers ready (provisioner + attacher + resizer + csi-plugin)
 
 # 5. Gate: verify the node DaemonSet rolled out
-kubectl -n synology-csi rollout status daemonset/synology-csi-node
-kubectl -n synology-csi get pods -l app=synology-csi-node
+kubectl -n synology-csi rollout status daemonset/synology-csi-ng-node
+kubectl -n synology-csi get pods -l app.kubernetes.io/name=synology-csi-ng,app.kubernetes.io/component=node
 # One pod per node, all Running
 
 # 6. Gate: verify existing PVCs still work
@@ -88,14 +88,13 @@ The `synology-csi-node` pod on that node is in `CrashLoopBackOff` or `Error` sta
 ```bash
 # Find the node plugin pod on the affected node
 NODE=miracle  # or whatever the node name is
-kubectl -n synology-csi get pods -l app=synology-csi-node -o wide | grep $NODE
+kubectl -n synology-csi get pods -l app.kubernetes.io/name=synology-csi-ng,app.kubernetes.io/component=node -o wide | grep $NODE
 
 # Check logs
-kubectl -n synology-csi logs -l app=synology-csi-node --tail=100 | grep -i "error\|panic\|not found"
+kubectl -n synology-csi logs -l app.kubernetes.io/name=synology-csi-ng,app.kubernetes.io/component=node --tail=100 | grep -i "error\|panic\|not found"
 
-# Check the CSI socket on the node (if you have SSH access)
-# talosctl ssh -n $NODE
-# ls -la /var/lib/kubelet/plugins/csi.synology.com/
+# Check the CSI socket on the node (Talos has no SSH — use `talosctl ls` / `talosctl read`, or a privileged pod with hostPath `/` mounted at `/host` + `chroot /host`)
+# talosctl -n $NODE ls /var/lib/kubelet/plugins/csi.san.synology.com/
 # Should show csi.sock
 ```
 
@@ -106,15 +105,15 @@ kubectl -n synology-csi logs -l app=synology-csi-node --tail=100 | grep -i "erro
 ```bash
 # Delete the pod — the DaemonSet will recreate it
 NODE=miracle
-POD=$(kubectl -n synology-csi get pods -l app=synology-csi-node -o wide | grep $NODE | awk '{print $1}')
+POD=$(kubectl -n synology-csi get pods -l app.kubernetes.io/name=synology-csi-ng,app.kubernetes.io/component=node -o wide | grep $NODE | awk '{print $1}')
 kubectl -n synology-csi delete pod $POD
 
 # Wait for the new pod to be ready
-kubectl -n synology-csi rollout status daemonset/synology-csi-node --timeout=5m
+kubectl -n synology-csi rollout status daemonset/synology-csi-ng-node --timeout=5m
 
 # Verify
-kubectl -n synology-csi get pods -l app=synology-csi-node -o wide | grep $NODE
-# Should be Running, 3/3 ready
+kubectl -n synology-csi get pods -l app.kubernetes.io/name=synology-csi-ng,app.kubernetes.io/component=node -o wide | grep $NODE
+# Should be Running, 2/2 ready (node-driver-registrar + csi-plugin)
 ```
 
 If the pod keeps crashing, check the node's kubelet logs and the node plugin logs for the root cause (often a stale iSCSI session or a DSM connectivity issue).
@@ -128,7 +127,7 @@ If the pod keeps crashing, check the node's kubelet logs and the node plugin log
 A pod fails to mount an iSCSI PVC after being rescheduled to a different node:
 
 ```
-MountVolume.Attach failed: rpc error: code = Internal desc = Failed to login to iSCSI target: iscsiadm: Login failed (exit code 24)
+attachdetach.AttachVolume failed for volume "pvc-abc123": rpc error: code = Internal desc = Failed to remove target path: iscsiadm: session for target "iqn.2000-01.com.synology:Coven-Compass.pvc-abc123" still logged in on the old node, stale record blocks re-attach (VolumeAttachment stuck "Attaching")
 ```
 
 Or on DSM → iSCSI Manager → Connected Initiators, you see multiple sessions from the same initiator IQN, some stale.
@@ -139,67 +138,61 @@ When a pod is evicted or a node crashes, the iSCSI session on the old node may n
 
 ### Procedure (tested 2026-10-01)
 
-**Option 1: Log out from the old node (if reachable)**
+Privileged pod + `chroot /host` using the host's `iscsiadm`.
 
-```bash
-# SSH to the old node (or use talosctl ssh)
-# List active iSCSI sessions
-iscsiadm -m session
-
-# Log out all sessions (or specify the target)
-iscsiadm -m node --logout
-
-# Verify
-iscsiadm -m session
-# Should be empty or show only active sessions
-```
-
-**Option 2: Purge via a privileged debug pod (if the node is unreachable)**
+Talos nodes have no SSH and no shell in the rootfs. The `synology-csi` namespace is already privileged, so run a one-shot pod on the affected node with `hostPID: true`, `hostNetwork: true`, and `/` mounted at `/host`. The pod image (alpine is fine) does NOT need `open-iscsi` — `iscsiadm` comes from the host rootfs via `chroot /host`.
 
 ```yaml
 apiVersion: v1
 kind: Pod
 metadata:
-  name: iscsi-cleanup
+  name: iscsi-fix
   namespace: synology-csi
 spec:
   nodeName: miracle  # the affected node
-  hostPID: true
   hostNetwork: true
+  hostPID: true
+  restartPolicy: Never
   containers:
-    - name: iscsiadm
+    - name: c
       image: alpine:3.20
-      command: ["sh", "-c", "sleep 3600"]
+      command: ["sleep", "600"]
       securityContext:
         privileged: true
       volumeMounts:
-        - name: iscsi-dir
-          mountPath: /etc/iscsi
-        - name: sys
-          mountPath: /sys
+        - name: root
+          mountPath: /host
   volumes:
-    - name: iscsi-dir
+    - name: root
       hostPath:
-        path: /etc/iscsi
-        type: DirectoryOrCreate
-    - name: sys
-      hostPath:
-        path: /sys
+        path: /
 ```
 
 ```bash
-kubectl apply -f iscsi-cleanup.yaml
-kubectl -n synology-csi exec -it iscsi-cleanup -- sh
+kubectl apply -f iscsi-fix.yaml
+kubectl -n synology-csi wait --for=condition=Ready pod/iscsi-fix --timeout=60s
 
-# Inside the pod:
-apk add open-iscsi
-iscsiadm -m session
-iscsiadm -m node --logout
+# 1. List sessions (each line is an active iSCSI session on the host)
+kubectl exec -n synology-csi iscsi-fix -- chroot /host /usr/local/sbin/iscsiadm -m session
 
-# Verify, then exit and delete the pod
-exit
-kubectl -n synology-csi delete pod iscsi-cleanup
+# 2. Identify which PVC-UIDs are orphaned (LUN already deleted on DSM) vs still active.
+#    KEEP the session of any PVC still bound to a running pod
+#    (e.g. pvc-39cf71a9 = vmsingle — do NOT log this one out).
+
+# 3. Logout ONLY the stale/orphan targets, one by one, by IQN:
+kubectl exec -n synology-csi iscsi-fix -- \
+  chroot /host /usr/local/sbin/iscsiadm -m node \
+  -T iqn.2000-01.com.synology:Coven-Compass.<pvc-uid> --logout
+# Expected: "Logout of [sid: N, target: ...] successful."
+
+# 4. Verify
+kubectl exec -n synology-csi iscsi-fix -- chroot /host /usr/local/sbin/iscsiadm -m session
+
+# 5. Cleanup
+kubectl -n synology-csi delete pod iscsi-fix
 ```
+
+⚠️ **Do NOT run `iscsiadm -m node --logout` without `-T <IQN>`** — that logs out every session, including volumes still in use.
 
 **Option 3: Disconnect from DSM side**
 
@@ -234,7 +227,7 @@ DSM → Shared Folder → select the PVC share → Edit → NFS Permissions. Ver
 
 **2. Check the mount options**
 
-The driver uses `nolock,vers=3` by default for NFSv3. If you are manually mounting to test:
+The driver passes `mountOptions` from the StorageClass through to the mount call (`pkg/driver/nodeserver.go:842`) — it does NOT inject `nolock,vers=3` on its own. Configure them on the StorageClass (e.g. `mountOptions: [nolock, vers=3]`). If you are manually mounting to test:
 
 ```bash
 # On the node:
@@ -268,7 +261,7 @@ DSM → Log Center → filter by "NFS" or "File Services". Look for:
 
 ## Controller sizing
 
-The controller deployment (`synology-csi-controller`) runs the CSI sidecars (provisioner, attacher, resizer, snapshotter) + the driver itself. It talks to DSM for every PVC operation, so it is I/O-bound on the DSM API, not CPU-bound.
+The controller StatefulSet (`synology-csi-ng-controller`, 4 containers: provisioner + attacher + resizer + csi-plugin) runs the CSI sidecars + the driver itself; the snapshotter runs in a separate Deployment (`synology-csi-ng-snapshotter`, 2 containers). The node plugin is a DaemonSet (`synology-csi-ng-node`, 2 containers: node-driver-registrar + csi-plugin). The controller is I/O-bound on the DSM API, not CPU-bound.
 
 ### Recommended resources
 
@@ -297,8 +290,8 @@ metadata:
 spec:
   targetRef:
     apiVersion: apps/v1
-    kind: Deployment
-    name: synology-csi-controller
+    kind: StatefulSet
+    name: synology-csi-ng-controller
   updatePolicy:
     updateMode: "Off"
 ```
@@ -314,7 +307,7 @@ kubectl -n synology-csi get vpa synology-csi-controller-vpa -o yaml | grep -A 10
 ### When to scale up
 
 - **>100 PVCs**: increase memory to 256Mi requests, 512Mi limits
-- **>500 PVCs**: consider running 2 controller replicas (the sidecars use leader election, so only one is active at a time, but the others are ready to take over)
+- **>500 PVCs**: consider running 2 controller replicas on the StatefulSet (the sidecars use leader election, so only one is active at a time, but the others are ready to take over)
 - **Frequent snapshot operations**: increase CPU requests to 100m (snapshotter is CPU-intensive during large snapshot lists)
 
 ---
@@ -322,5 +315,5 @@ kubectl -n synology-csi get vpa synology-csi-controller-vpa -o yaml | grep -A 10
 ## Emergency contacts
 
 - **DSM unreachable**: check network, then DSM → Control Panel → Terminal & SNMP → Terminal → enable SSH, then SSH in and check `/var/log/messages` for NFS/iSCSI errors
-- **Driver pods CrashLoopBackOff**: check logs (`kubectl logs -n synology-csi -l app=synology-csi-controller --tail=200`), then restart the pod
+- **Driver pods CrashLoopBackOff**: check logs (`kubectl logs -n synology-csi -l app.kubernetes.io/name=synology-csi-ng,app.kubernetes.io/component=controller --tail=200`), then restart the pod
 - **Data loss suspected**: do NOT delete the PVC or PV. Follow `docs/DISASTER-RECOVERY.md` to snapshot/clone the LUN first, then investigate

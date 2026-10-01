@@ -1,7 +1,8 @@
 # Disaster recovery — Synology CSI PVCs
 
-> **Last validated**: 2026-10-01, driver v1.4.0 (patched), DSM 7.x (Xpenology), Talos Linux.
 > **Scope**: backup and restore of PVCs backed by the Synology CSI driver (iSCSI LUNs, NFS shares, SMB shares).
+>
+> **Validation status**: only the iSCSI session purge procedure in `docs/OPERATIONS.md` has been executed end-to-end (marked `tested 2026-10-01`). The snapshot/restore, LUN-clone, and manual PV re-attach paths below are **untested — validate before relying on them** in a real disaster.
 
 ## Mental model: LUN vs share
 
@@ -24,7 +25,7 @@ Before planning DR, understand what the driver actually creates on DSM:
 The Synology CSI driver supports `VolumeSnapshot` via the DSM API. This creates a point-in-time snapshot of the LUN on the NAS.
 
 **Prerequisites**:
-- `VolumeSnapshotClass` configured (see `charts/synology-csi-ng/templates/volumesnapshotclass.yaml`)
+- `VolumeSnapshotClass` configured — rendered from `charts/synology-csi-ng/templates/storageclasses.yaml:20-29` when `volumeSnapshotClasses` is non-empty in values (empty by default)
 - Snapshotter sidecar running in the controller (default in our chart)
 
 **Backup**:
@@ -64,13 +65,13 @@ spec:
 
 **Velero integration**:
 
-Velero's CSI plugin (enabled by default in Velero v1.10+) discovers `VolumeSnapshotClass` resources and includes CSI snapshots in cluster backups. No extra config needed beyond enabling the CSI feature flag:
+Velero ≥ v1.15 ships CSI snapshot support built-in (the dedicated `velero-plugin-for-csi` repo is archived and returns 404). On our cluster (Velero v1.18.1) no extra plugin or `--features=EnableCSI` flag is needed — Velero discovers `VolumeSnapshotClass` resources natively. Configure the backup storage location and Velero will include CSI snapshots automatically:
 
 ```bash
 velero install \
-  --features=EnableCSI \
-  --plugins velero/velero-plugin-for-csi:latest \
-  # ... other flags (provider, bucket, etc.)
+  --provider <your-provider> \
+  --bucket <your-bucket> \
+  # ... other provider-specific flags
 ```
 
 Then a scheduled backup includes all PVCs + their snapshots:
@@ -145,13 +146,9 @@ When restoring a cluster from scratch (new Kubernetes, same DSM data), follow th
      --values my-values.yaml
    ```
 
-2. **StorageClass**: ensure the `StorageClass` objects exist (they are part of the chart, deployed automatically). If you have custom StorageClasses, apply them:
+2. **StorageClass**: the chart renders `StorageClass` objects from `values.storageClasses` (empty by default). Provide your own values file with the classes you need (e.g. `synology-iscsi-storage`, `synology-nfs-storage`) and reinstall/upgrade — there are no StorageClasses until you configure them.
 
-   ```bash
-   kubectl apply -f storageclasses.yaml
-   ```
-
-3. **VolumeSnapshotClass**: if you used CSI snapshots, ensure the `VolumeSnapshotClass` exists (also in the chart by default).
+3. **VolumeSnapshotClass**: same model — rendered from `values.volumeSnapshotClasses` (empty by default). Only required if you use CSI snapshots.
 
 4. **PV re-attachment**: for **static PVs** (where you manually specify `volumeHandle`), the PV object must be recreated pointing to the existing LUN/share on DSM. For **dynamic PVCs** (where the driver created the LUN/share), Kubernetes will re-attach the existing PVC to the existing LUN/share automatically — the `volumeHandle` in the PV spec is the LUN UUID or share path, which does not change.
 
@@ -166,7 +163,7 @@ When restoring a cluster from scratch (new Kubernetes, same DSM data), follow th
      capacity:
        storage: 10Gi
      csi:
-       driver: csi.synology.com
+       driver: csi.san.synology.com
        volumeHandle: pvc-abc123  # must match the LUN UUID or share name on DSM
        volumeAttributes:
          protocol: iscsi
@@ -198,7 +195,7 @@ iscsiadm -m node --logout
 # iSCSI Manager → Connected Initiators → select the stale session → Disconnect
 ```
 
-**Prevention**: our chart sets `reclaimPolicy: Retain` on StorageClasses by default, so PVCs are not deleted when pods are evicted. This avoids the race where the driver deletes the LUN while the old session is still active.
+**Prevention**: consider setting `reclaimPolicy: Retain` on your StorageClasses (the chart default follows the upstream `reclaimPolicy: Delete` convention — see `values.yaml`). Retain keeps the PV/LUN alive after the PVC is deleted, which avoids the race where the driver deletes the LUN while the old session is still active.
 
 ### 32-char share name truncation
 
@@ -206,9 +203,9 @@ iscsiadm -m node --logout
 
 **Cause**: DSM truncates share names to 32 characters. The driver generates names like `pvc-a1b2c3d4-e5f6-7890-abcd-ef1234567890` (48 chars), creates the share with the truncated name, but then tries to mount the **full** (untruncated) name, which does not exist on DSM.
 
-**Fix**: this is patched in our builds (see `patches/v1.4.0/0002-critical-stability-security.patch`). The driver now uses the truncated name consistently.
+**Fix**: this is an upstream bug on the mount path (the GenShareName create side has truncated correctly since v1.1.0; only the mount call still uses the untruncated name). See diagnosis in `docs/CODE-REVIEW-v1.4.0.md`. No patch in our builds fixes this yet.
 
-**If you are on upstream v1.4.0 without the patch**: manually rename the share on DSM to match the truncated name, or apply the patch.
+**Workaround**: manually rename the share on DSM to match the truncated name, or patch the driver's mount path to truncate symmetrically.
 
 ### DSM export table losing entries
 
