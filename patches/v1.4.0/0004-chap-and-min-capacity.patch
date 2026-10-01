@@ -28,34 +28,52 @@ index 50ff762..3503e4e 100644
  }
  
 diff --git a/pkg/driver/controllerserver.go b/pkg/driver/controllerserver.go
-index 03f3983..a718e5d 100644
+index 03f3983..3ae74e3 100644
 --- a/pkg/driver/controllerserver.go
 +++ b/pkg/driver/controllerserver.go
-@@ -19,6 +19,7 @@ package driver
+@@ -19,6 +19,8 @@ package driver
  import (
  	"context"
  	"fmt"
++	"math"
 +	"regexp"
  	"sort"
  	"strconv"
  	"strings"
-@@ -46,11 +47,68 @@ type controllerServer struct {
+@@ -46,11 +48,98 @@ type controllerServer struct {
  // minVolumeSizeBytes is the DSM-side sane minimum for a LUN/namespace. Synology
  // DSM rejects very small volumes with obscure error codes, so the driver clamps
  // smaller requests up to this value rather than failing (issue #104).
 -const minVolumeSizeBytes = 1 * utils.UNIT_GB // 1 GiB
 +// Overridable per StorageClass via the "minVolumeSize" parameter (issue #78).
 +const defaultMinVolumeSizeBytes = 1 * utils.UNIT_GB // 1 GiB
-+
+ 
+-func getSizeByCapacityRange(capRange *csi.CapacityRange) (int64, error) {
 +// minVolumeSizeRe matches a size string like "500Mi", "1Gi", "1073741824" (plain bytes).
 +// Supported suffixes: Ki, Mi, Gi, Ti (binary, powers of 1024).
 +var minVolumeSizeRe = regexp.MustCompile(`^(\d+)(Ki|Mi|Gi|Ti)?$`)
++
++// mulNoOverflow returns a*b iff it fits in a non-negative int64; otherwise
++// (false, 0). Used to reject minVolumeSize inputs that would wrap around
++// silently when multiplied by their suffix multiplier.
++func mulNoOverflow(a, b int64) (ok bool, result int64) {
++	if a <= 0 || b <= 0 {
++		return false, 0
++	}
++	// a*b overflows iff a > MaxInt64/b (b > 0).
++	if a > math.MaxInt64/b {
++		return false, 0
++	}
++	return true, a * b
++}
 +
 +// parseMinVolumeSize parses a minVolumeSize StorageClass parameter. Supported formats:
 +//   - Plain bytes: "1073741824"
 +//   - Binary suffixes: "500Mi", "1Gi", "2Ti"
 +//
-+// Returns the size in bytes, or an error if the format is invalid.
++// Returns the size in bytes, or an error if the format is invalid or the result
++// would overflow int64 (e.g. "10000000000000000000Ti" — rejected with
++// InvalidArgument rather than silently wrapping).
 +// An empty string returns the default 1 GiB (defaultMinVolumeSizeBytes).
 +func parseMinVolumeSize(s string) (int64, error) {
 +	if s == "" {
@@ -76,49 +94,67 @@ index 03f3983..a718e5d 100644
 +	}
 +
 +	suffix := matches[2]
++	var multiplier int64
 +	switch suffix {
 +	case "":
-+		// Plain bytes
-+		return value, nil
++		multiplier = 1
 +	case "Ki":
-+		return value * 1024, nil
++		multiplier = 1024
 +	case "Mi":
-+		return value * utils.UNIT_MB, nil
++		multiplier = utils.UNIT_MB
 +	case "Gi":
-+		return value * utils.UNIT_GB, nil
++		multiplier = utils.UNIT_GB
 +	case "Ti":
-+		return value * 1024 * utils.UNIT_GB, nil
++		// 1 TiB = 1024 * UNIT_GB; fold the factor in so we do one overflow
++		// check instead of a chained multiply.
++		multiplier = 1024 * utils.UNIT_GB
 +	default:
 +		return 0, fmt.Errorf("unsupported suffix %q in minVolumeSize", suffix)
 +	}
++
++	ok, result := mulNoOverflow(value, multiplier)
++	if !ok {
++		return 0, fmt.Errorf("minVolumeSize %q overflows int64", s)
++	}
++	return result, nil
 +}
 +
 +// getSizeByCapacityRange extracts the volume size from a CSI CapacityRange,
-+// enforcing a minimum floor. If minVolumeSizeFloor is 0, the default 1 GiB is used.
-+// If capRange is nil, minVolumeSizeFloor is returned (or 1 GiB if it's also 0).
-+// If RequiredBytes is below the floor, it is clamped up to the floor (not rejected),
-+// so that small PVC requests can still be satisfied by the driver's minimum.
++// clamping requests below the supplied floor up to that floor instead of
++// rejecting them (a 10 MiB PVC is honored as a 1 GiB LUN — issue #104).
++//
++// Floor semantics (IMPORTANT — do not conflate the two call sites):
++//   - floor > 0: clamp to floor. Used by CreateVolume, where the floor is the
++//     StorageClass `minVolumeSize` parameter (parseMinVolumeSize already
++//     defaults an empty parameter to defaultMinVolumeSizeBytes = 1 GiB, so
++//     CreateVolume always passes a positive floor).
++//   - floor == 0: NO clamp. Used by ControllerExpandVolume and NodeExpandVolume
++//     — an expand request smaller than 1 GiB must NOT be silently inflated to
++//     1 GiB, because that would over-allocate on the DSM. Shrinks are already
++//     blocked DSM-side (dsm.go ~L965-969), so no floor is needed here either.
++//
++// If capRange is nil, floor is returned directly (0 for the expansion paths,
++// 1 GiB for CreateVolume via parseMinVolumeSize's default).
 +func getSizeByCapacityRange(capRange *csi.CapacityRange, minVolumeSizeFloor int64) (int64, error) {
-+	floor := minVolumeSizeFloor
-+	if floor == 0 {
-+		floor = defaultMinVolumeSizeBytes
-+	}
- 
--func getSizeByCapacityRange(capRange *csi.CapacityRange) (int64, error) {
  	if capRange == nil {
 -		return minVolumeSizeBytes, nil
-+		return floor, nil
++		return minVolumeSizeFloor, nil
  	}
  
  	minSize := capRange.GetRequiredBytes()
-@@ -61,11 +119,11 @@ func getSizeByCapacityRange(capRange *csi.CapacityRange) (int64, error) {
+@@ -59,13 +148,14 @@ func getSizeByCapacityRange(capRange *csi.CapacityRange) (int64, error) {
+ 		return 0, status.Error(codes.InvalidArgument, "Invalid input: limitBytes is smaller than requiredBytes")
+ 	}
  
- 	// Clamp to the DSM minimum instead of rejecting tiny requests — a 10 MiB
- 	// PVC is honored as a 1 GiB LUN (issue #104).
+-	// Clamp to the DSM minimum instead of rejecting tiny requests — a 10 MiB
+-	// PVC is honored as a 1 GiB LUN (issue #104).
 -	if minSize < minVolumeSizeBytes {
 -		minSize = minVolumeSizeBytes
-+	if minSize < floor {
-+		minSize = floor
++	// Clamp to the floor only when one is supplied. Expansion paths pass 0 to
++	// opt out of clamping — a 500 MiB expand on a 500 MiB SC must stay 500 MiB
++	// (or whatever the caller asked for), not be inflated to 1 GiB.
++	if minVolumeSizeFloor > 0 && minSize < minVolumeSizeFloor {
++		minSize = minVolumeSizeFloor
  	}
  
 -	// Respect the user's upper bound: if they asked for < minVolumeSizeBytes
@@ -126,7 +162,7 @@ index 03f3983..a718e5d 100644
  	// with a tight limit, the clamp would violate the limit.
  	if 0 < maxSize && maxSize < minSize {
  		return 0, status.Error(codes.InvalidArgument, "Invalid input: limitBytes is smaller than the DSM minimum")
-@@ -135,7 +193,6 @@ func parseDevAttribs(params map[string]string) (map[string]bool, error) {
+@@ -135,7 +225,6 @@ func parseDevAttribs(params map[string]string) (map[string]bool, error) {
  }
  
  func (cs *controllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error) {
@@ -134,7 +170,7 @@ index 03f3983..a718e5d 100644
  	volName, volCap := req.GetName(), req.GetVolumeCapabilities()
  	volContentSrc := req.GetVolumeContentSource()
  
-@@ -143,10 +200,6 @@ func (cs *controllerServer) CreateVolume(ctx context.Context, req *csi.CreateVol
+@@ -143,10 +232,6 @@ func (cs *controllerServer) CreateVolume(ctx context.Context, req *csi.CreateVol
  	var srcVolumeId string = ""
  	var multiSession bool = false
  
@@ -145,7 +181,7 @@ index 03f3983..a718e5d 100644
  	if volName == "" {
  		return nil, status.Errorf(codes.InvalidArgument, "No name is provided")
  	}
-@@ -157,6 +210,18 @@ func (cs *controllerServer) CreateVolume(ctx context.Context, req *csi.CreateVol
+@@ -157,6 +242,18 @@ func (cs *controllerServer) CreateVolume(ctx context.Context, req *csi.CreateVol
  
  	params := req.GetParameters()
  
@@ -164,53 +200,24 @@ index 03f3983..a718e5d 100644
  	// Parsed before the capability loop below, which needs the protocol to tell
  	// whether the requested access type can be served.
  	protocol := strings.ToLower(params["protocol"])
-@@ -322,7 +387,44 @@ func (cs *controllerServer) DeleteVolume(ctx context.Context, req *csi.DeleteVol
+@@ -321,6 +418,16 @@ func (cs *controllerServer) DeleteVolume(ctx context.Context, req *csi.DeleteVol
+ 	return &csi.DeleteVolumeResponse{}, nil
  }
  
++// ControllerPublishVolume is intentionally Unimplemented (matches upstream
++// v1.4.0). The driver does not declare the PUBLISH_UNPUBLISH_VOLUME capability
++// (see driver.go), so the CSI external-attacher never calls this RPC. The
++// existing detach path keeps working unchanged.
++//
++// When CHAP lands as a complete feature (capability + publish + unpublish +
++// TargetSetAuth), this is where the per-volume auth will be applied. Until
++// then, do not wire secrets to SetTargetAuth here: secrets provided via
++// node-stage-secret do not reach ControllerPublishVolume, so any wiring would
++// be dead code or (worse) silently misapplied. Tracked, not shipped.
  func (cs *controllerServer) ControllerPublishVolume(ctx context.Context, req *csi.ControllerPublishVolumeRequest) (*csi.ControllerPublishVolumeResponse, error) {
--	return nil, status.Error(codes.Unimplemented, "")
-+	volumeId := req.GetVolumeId()
-+	if volumeId == "" {
-+		return nil, status.Error(codes.InvalidArgument, "No volume id is provided")
-+	}
-+
-+	k8sVolume, err := cs.dsmService.GetVolume(volumeId)
-+	if err != nil {
-+		return nil, status.Errorf(codes.Unavailable,
-+			"Couldn't determine whether volume[%s] exists: %v", volumeId, err)
-+	}
-+	if k8sVolume == nil {
-+		return nil, status.Errorf(codes.NotFound, "Volume[%s] is not found", volumeId)
-+	}
-+
-+	// CHAP authentication: if secrets contain chapUser and chapPassword, configure
-+	// CHAP on the iSCSI target. This allows per-volume authentication without
-+	// modifying the target at creation time (backward compatible: no secrets = no auth).
-+	secrets := req.GetSecrets()
-+	chapUser := secrets["chapUser"]
-+	chapPassword := secrets["chapPassword"]
-+
-+	// Validate that both or neither are provided
-+	if (chapUser == "") != (chapPassword == "") {
-+		return nil, status.Error(codes.InvalidArgument,
-+			"CHAP credentials incomplete: both chapUser and chapPassword must be provided together")
-+	}
-+
-+	// If CHAP credentials are present, configure them on the target
-+	if chapUser != "" && chapPassword != "" {
-+		targetId := fmt.Sprintf("%d", k8sVolume.Target.TargetId)
-+		if err := cs.dsmService.SetTargetAuth(k8sVolume.DsmIp, targetId, chapUser, chapPassword); err != nil {
-+			return nil, status.Errorf(codes.Internal,
-+				"Failed to set CHAP authentication on target[%s]: %v", targetId, err)
-+		}
-+		log.Infof("CHAP authentication configured for volume[%s] target[%s]", volumeId, targetId)
-+	}
-+
-+	return &csi.ControllerPublishVolumeResponse{}, nil
+ 	return nil, status.Error(codes.Unimplemented, "")
  }
- 
- func (cs *controllerServer) ControllerUnpublishVolume(ctx context.Context, req *csi.ControllerUnpublishVolumeRequest) (*csi.ControllerUnpublishVolumeResponse, error) {
-@@ -621,7 +723,7 @@ func (cs *controllerServer) ControllerExpandVolume(ctx context.Context, req *csi
+@@ -621,7 +728,7 @@ func (cs *controllerServer) ControllerExpandVolume(ctx context.Context, req *csi
  			"InvalidArgument: Please check volume ID and capacity range.")
  	}
  
@@ -219,313 +226,19 @@ index 03f3983..a718e5d 100644
  	if err != nil {
  		return nil, status.Errorf(codes.InvalidArgument,
  			"InvalidArgument: Please check CapacityRange[%v]", capRange)
-diff --git a/pkg/driver/controllerserver_chap_test.go b/pkg/driver/controllerserver_chap_test.go
-new file mode 100644
-index 0000000..e975567
---- /dev/null
-+++ b/pkg/driver/controllerserver_chap_test.go
-@@ -0,0 +1,292 @@
-+/*
-+Copyright 2026 Synology Inc.
-+
-+Licensed under the Apache License, Version 2.0 (the "License");
-+you may not use this file except in compliance with the License.
-+You may obtain a copy of the License at
-+
-+    http://www.apache.org/licenses/LICENSE-2.0
-+
-+Unless required by applicable law or agreed to in writing, software
-+distributed under the License is distributed on an "AS IS" BASIS,
-+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-+See the License for the specific language governing permissions and
-+limitations under the License.
-+*/
-+
-+package driver
-+
-+import (
-+	"context"
-+	"fmt"
-+	"testing"
-+
-+	"github.com/container-storage-interface/spec/lib/go/csi"
-+	"github.com/SynologyOpenSource/synology-csi/pkg/dsm/common"
-+	"github.com/SynologyOpenSource/synology-csi/pkg/dsm/webapi"
-+	"github.com/SynologyOpenSource/synology-csi/pkg/models"
-+	"google.golang.org/grpc/codes"
-+	"google.golang.org/grpc/status"
-+)
-+
-+// mockDsmServiceForChap is a minimal mock for testing ControllerPublishVolume.
-+// It tracks whether SetTargetAuth was called and with what arguments.
-+type mockDsmServiceForChap struct {
-+	volumes             map[string]*models.K8sVolumeRespSpec
-+	setTargetAuthCalled bool
-+	setTargetAuthDsmIp  string
-+	setTargetAuthTarget string
-+	setTargetAuthUser   string
-+	setTargetAuthPass   string
-+	setTargetAuthError  error
-+}
-+
-+func (m *mockDsmServiceForChap) AddDsm(client common.ClientInfo) error { return nil }
-+func (m *mockDsmServiceForChap) RemoveAllDsms()                        {}
-+func (m *mockDsmServiceForChap) GetDsm(ip string) (*webapi.DSM, error) { return nil, nil }
-+func (m *mockDsmServiceForChap) GetDsmsCount() int                     { return 0 }
-+func (m *mockDsmServiceForChap) ListDsmVolumes(ip string) ([]webapi.VolInfo, error) {
-+	return nil, nil
-+}
-+func (m *mockDsmServiceForChap) CreateVolume(spec *models.CreateK8sVolumeSpec) (*models.K8sVolumeRespSpec, error) {
-+	return nil, nil
-+}
-+func (m *mockDsmServiceForChap) DeleteVolume(volId string) error { return nil }
-+func (m *mockDsmServiceForChap) ListVolumes() ([]*models.K8sVolumeRespSpec, error) {
-+	return nil, nil
-+}
-+func (m *mockDsmServiceForChap) GetVolume(volId string) (*models.K8sVolumeRespSpec, error) {
-+	if vol, ok := m.volumes[volId]; ok {
-+		return vol, nil
-+	}
-+	return nil, nil
-+}
-+func (m *mockDsmServiceForChap) ExpandVolume(volId string, newSize int64) (*models.K8sVolumeRespSpec, error) {
-+	return nil, nil
-+}
-+func (m *mockDsmServiceForChap) CreateSnapshot(spec *models.CreateK8sVolumeSnapshotSpec) (*models.K8sSnapshotRespSpec, error) {
-+	return nil, nil
-+}
-+func (m *mockDsmServiceForChap) DeleteSnapshot(snapshotUuid string) error { return nil }
-+func (m *mockDsmServiceForChap) ListAllSnapshots() []*models.K8sSnapshotRespSpec {
-+	return nil
-+}
-+func (m *mockDsmServiceForChap) ListSnapshots(volId string) []*models.K8sSnapshotRespSpec {
-+	return nil
-+}
-+func (m *mockDsmServiceForChap) GetVolumeByName(volName string) (*models.K8sVolumeRespSpec, error) {
-+	return nil, nil
-+}
-+func (m *mockDsmServiceForChap) GetSnapshotByName(snapshotName string) *models.K8sSnapshotRespSpec {
-+	return nil
-+}
-+func (m *mockDsmServiceForChap) SetTargetAuth(dsmIp string, targetId string, chapUser string, chapPass string) error {
-+	m.setTargetAuthCalled = true
-+	m.setTargetAuthDsmIp = dsmIp
-+	m.setTargetAuthTarget = targetId
-+	m.setTargetAuthUser = chapUser
-+	m.setTargetAuthPass = chapPass
-+	return m.setTargetAuthError
-+}
-+
-+// TestControllerPublishVolume_WithChapSecrets verifies that when CHAP credentials
-+// are provided in the secrets, ControllerPublishVolume calls SetTargetAuth on the
-+// DSM service with the correct arguments.
-+func TestControllerPublishVolume_WithChapSecrets(t *testing.T) {
-+	mockService := &mockDsmServiceForChap{
-+		volumes: map[string]*models.K8sVolumeRespSpec{
-+			"vol-123": {
-+				VolumeId: "vol-123",
-+				DsmIp:    "10.0.0.1",
-+				Target: webapi.TargetInfo{
-+					TargetId: 456,
-+				},
-+			},
-+		},
-+	}
-+
-+	cs := &controllerServer{
-+		dsmService: mockService,
-+	}
-+
-+	req := &csi.ControllerPublishVolumeRequest{
-+		VolumeId: "vol-123",
-+		NodeId:   "node-1",
-+		Secrets: map[string]string{
-+			"chapUser":     "myuser",
-+			"chapPassword": "mypassword",
-+		},
-+	}
-+
-+	_, err := cs.ControllerPublishVolume(context.Background(), req)
-+	if err != nil {
-+		t.Fatalf("ControllerPublishVolume returned error: %v", err)
-+	}
-+
-+	if !mockService.setTargetAuthCalled {
-+		t.Fatal("expected SetTargetAuth to be called when CHAP secrets are present")
-+	}
-+	if mockService.setTargetAuthDsmIp != "10.0.0.1" {
-+		t.Errorf("dsmIp = %q, want %q", mockService.setTargetAuthDsmIp, "10.0.0.1")
-+	}
-+	if mockService.setTargetAuthTarget != "456" {
-+		t.Errorf("target_id = %q, want %q", mockService.setTargetAuthTarget, "456")
-+	}
-+	if mockService.setTargetAuthUser != "myuser" {
-+		t.Errorf("chap_user = %q, want %q", mockService.setTargetAuthUser, "myuser")
-+	}
-+	if mockService.setTargetAuthPass != "mypassword" {
-+		t.Errorf("chap_pass = %q, want %q", mockService.setTargetAuthPass, "mypassword")
-+	}
-+}
-+
-+// TestControllerPublishVolume_WithoutSecrets verifies that when no CHAP secrets
-+// are provided, ControllerPublishVolume does not call SetTargetAuth (backward
-+// compatible behavior: the target keeps its existing auth setting).
-+func TestControllerPublishVolume_WithoutSecrets(t *testing.T) {
-+	mockService := &mockDsmServiceForChap{
-+		volumes: map[string]*models.K8sVolumeRespSpec{
-+			"vol-456": {
-+				VolumeId: "vol-456",
-+				DsmIp:    "10.0.0.2",
-+				Target: webapi.TargetInfo{
-+					TargetId: 789,
-+				},
-+			},
-+		},
-+	}
-+
-+	cs := &controllerServer{
-+		dsmService: mockService,
-+	}
-+
-+	req := &csi.ControllerPublishVolumeRequest{
-+		VolumeId: "vol-456",
-+		NodeId:   "node-1",
-+		Secrets:  map[string]string{},
-+	}
-+
-+	_, err := cs.ControllerPublishVolume(context.Background(), req)
-+	if err != nil {
-+		t.Fatalf("ControllerPublishVolume returned error: %v", err)
-+	}
-+
-+	if mockService.setTargetAuthCalled {
-+		t.Error("expected SetTargetAuth NOT to be called when no CHAP secrets are present")
-+	}
-+}
-+
-+// TestControllerPublishVolume_VolumeNotFound verifies that ControllerPublishVolume
-+// returns NotFound when the volume doesn't exist.
-+func TestControllerPublishVolume_VolumeNotFound(t *testing.T) {
-+	mockService := &mockDsmServiceForChap{
-+		volumes: map[string]*models.K8sVolumeRespSpec{},
-+	}
-+
-+	cs := &controllerServer{
-+		dsmService: mockService,
-+	}
-+
-+	req := &csi.ControllerPublishVolumeRequest{
-+		VolumeId: "vol-nonexistent",
-+		NodeId:   "node-1",
-+	}
-+
-+	_, err := cs.ControllerPublishVolume(context.Background(), req)
-+	if err == nil {
-+		t.Fatal("expected error for non-existent volume, got nil")
-+	}
-+
-+	st, ok := status.FromError(err)
-+	if !ok {
-+		t.Fatalf("expected gRPC status error, got: %v", err)
-+	}
-+	if st.Code() != codes.NotFound {
-+		t.Errorf("error code = %v, want %v", st.Code(), codes.NotFound)
-+	}
-+}
-+
-+// TestControllerPublishVolume_SecretsOnlyNoUser verifies that a chapPassword
-+// without a chapUser is rejected as InvalidArgument (CHAP requires both).
-+func TestControllerPublishVolume_SecretsOnlyNoUser(t *testing.T) {
-+	mockService := &mockDsmServiceForChap{
-+		volumes: map[string]*models.K8sVolumeRespSpec{
-+			"vol-789": {
-+				VolumeId: "vol-789",
-+				DsmIp:    "10.0.0.3",
-+				Target: webapi.TargetInfo{
-+					TargetId: 111,
-+				},
-+			},
-+		},
-+	}
-+
-+	cs := &controllerServer{
-+		dsmService: mockService,
-+	}
-+
-+	req := &csi.ControllerPublishVolumeRequest{
-+		VolumeId: "vol-789",
-+		NodeId:   "node-1",
-+		Secrets: map[string]string{
-+			"chapPassword": "orphan",
-+		},
-+	}
-+
-+	_, err := cs.ControllerPublishVolume(context.Background(), req)
-+	if err == nil {
-+		t.Fatal("expected error when chapPassword is provided without chapUser")
-+	}
-+	st, ok := status.FromError(err)
-+	if !ok {
-+		t.Fatalf("expected gRPC status error, got: %v", err)
-+	}
-+	if st.Code() != codes.InvalidArgument {
-+		t.Errorf("error code = %v, want %v", st.Code(), codes.InvalidArgument)
-+	}
-+	if mockService.setTargetAuthCalled {
-+		t.Error("SetTargetAuth should not be called when credentials are incomplete")
-+	}
-+}
-+
-+// TestControllerPublishVolume_SetAuthError verifies that a failure from
-+// SetTargetAuth propagates as an Internal error.
-+func TestControllerPublishVolume_SetAuthError(t *testing.T) {
-+	mockService := &mockDsmServiceForChap{
-+		volumes: map[string]*models.K8sVolumeRespSpec{
-+			"vol-err": {
-+				VolumeId: "vol-err",
-+				DsmIp:    "10.0.0.4",
-+				Target: webapi.TargetInfo{
-+					TargetId: 222,
-+				},
-+			},
-+		},
-+		setTargetAuthError: fmt.Errorf("dsm api error"),
-+	}
-+
-+	cs := &controllerServer{
-+		dsmService: mockService,
-+	}
-+
-+	req := &csi.ControllerPublishVolumeRequest{
-+		VolumeId: "vol-err",
-+		NodeId:   "node-1",
-+		Secrets: map[string]string{
-+			"chapUser":     "u",
-+			"chapPassword": "p",
-+		},
-+	}
-+
-+	_, err := cs.ControllerPublishVolume(context.Background(), req)
-+	if err == nil {
-+		t.Fatal("expected error when SetTargetAuth fails")
-+	}
-+	st, ok := status.FromError(err)
-+	if !ok {
-+		t.Fatalf("expected gRPC status error, got: %v", err)
-+	}
-+	if st.Code() != codes.Internal {
-+		t.Errorf("error code = %v, want %v", st.Code(), codes.Internal)
-+	}
-+}
 diff --git a/pkg/driver/driver.go b/pkg/driver/driver.go
-index 0b3f2ae..3958948 100644
+index 0b3f2ae..f8a25f0 100644
 --- a/pkg/driver/driver.go
 +++ b/pkg/driver/driver.go
-@@ -72,6 +72,7 @@ func NewControllerAndNodeDriver(nodeID string, endpoint string, dsmService inter
+@@ -72,6 +72,11 @@ func NewControllerAndNodeDriver(nodeID string, endpoint string, dsmService inter
  		csi.ControllerServiceCapability_RPC_LIST_SNAPSHOTS,
  		csi.ControllerServiceCapability_RPC_CLONE_VOLUME,
  		csi.ControllerServiceCapability_RPC_GET_CAPACITY,
-+		csi.ControllerServiceCapability_RPC_PUBLISH_UNPUBLISH_VOLUME,
++		// NOTE: RPC_PUBLISH_UNPUBLISH_VOLUME is intentionally NOT declared
++		// (matches upstream v1.4.0). Without the capability, the CSI external-
++		// attacher will never call ControllerPublish/UnpublishVolume, so the
++		// existing detach path keeps working unchanged. CHAP (when it lands)
++		// will be wired together with this capability in a single feature PR.
  	})
  
  	d.addVolumeCapabilityAccessModes([]csi.VolumeCapability_AccessMode_Mode{
@@ -545,10 +258,10 @@ index 0db09eb..ee2e696 100644
  // reach the lookup instead of being rejected by capability validation first.
 diff --git a/pkg/driver/min_capacity_test.go b/pkg/driver/min_capacity_test.go
 new file mode 100644
-index 0000000..d398b39
+index 0000000..7c85c8b
 --- /dev/null
 +++ b/pkg/driver/min_capacity_test.go
-@@ -0,0 +1,140 @@
+@@ -0,0 +1,160 @@
 +/*
 +Copyright 2026 Synology Inc.
 +
@@ -597,6 +310,8 @@ index 0000000..d398b39
 +		{"zero not allowed", "0", 0, true},
 +		{"non-numeric", "abc", 0, true},
 +		{"fractional not supported", "1.5Gi", 0, true},
++		{"overflow Ti rejected", "9999999999999999Ti", 0, true},
++		{"overflow Gi rejected", "999999999999999999Gi", 0, true},
 +	}
 +
 +	for _, tt := range tests {
@@ -668,10 +383,28 @@ index 0000000..d398b39
 +			wantErr:       true,
 +		},
 +		{
-+			name:          "default 1GiB when minVolumeSize is 0",
++			name:          "floor 0 means no floor (expansion path) — nil capRange returns 0",
 +			capRange:      nil,
 +			minVolumeSize: 0,
-+			want:          1 * utils.UNIT_GB,
++			want:          0,
++			wantErr:       false,
++		},
++		{
++			name: "floor 0 — small requiredBytes passes through unchanged (no clamp)",
++			capRange: &csi.CapacityRange{
++				RequiredBytes: 500 * utils.UNIT_MB,
++			},
++			minVolumeSize: 0,
++			want:          500 * utils.UNIT_MB,
++			wantErr:       false,
++		},
++		{
++			name: "floor 0 — expand 800Mi on SC floor 500Mi is not clamped to 1GiB",
++			capRange: &csi.CapacityRange{
++				RequiredBytes: 800 * utils.UNIT_MB,
++			},
++			minVolumeSize: 0,
++			want:          800 * utils.UNIT_MB,
 +			wantErr:       false,
 +		},
 +	}
@@ -703,16 +436,20 @@ index 047189d..2272d79 100644
  		return nil, status.Error(codes.InvalidArgument, "InvalidArgument: Please check volume ID and volume path.")
  	}
 diff --git a/pkg/dsm/service/dsm.go b/pkg/dsm/service/dsm.go
-index a74ecb6..f9d1c99 100644
+index a74ecb6..fbccb41 100644
 --- a/pkg/dsm/service/dsm.go
 +++ b/pkg/dsm/service/dsm.go
-@@ -96,6 +96,20 @@ func (service *DsmService) GetDsm(ip string) (*webapi.DSM, error) {
+@@ -96,6 +96,24 @@ func (service *DsmService) GetDsm(ip string) (*webapi.DSM, error) {
  	return dsm, nil
  }
  
-+// SetTargetAuth configures CHAP authentication on an iSCSI target hosted on the
-+// DSM at dsmIp. It wraps webapi.DSM.TargetSetAuth so callers (typically the
-+// controller server) do not need to resolve the DSM handle themselves.
++// SetTargetAuth configures CHAP authentication on a target hosted on the DSM
++// at dsmIp. It wraps webapi.DSM.TargetSetAuth so callers do not need to
++// resolve the DSM handle themselves.
++//
++// ARCHITECTURE (patch 0004 — groundwork only): kept as part of the CHAP
++// groundwork; see webapi/iscsi.go TargetSetAuth for the full rationale.
++// Not wired into ControllerPublishVolume yet — tracked, not shipped.
 +func (service *DsmService) SetTargetAuth(dsmIp string, targetId string, chapUser string, chapPass string) error {
 +	dsm, err := service.GetDsm(dsmIp)
 +	if err != nil {
@@ -728,10 +465,10 @@ index a74ecb6..f9d1c99 100644
  	service.dsmsMu.RLock()
  	n := len(service.dsms)
 diff --git a/pkg/dsm/webapi/iscsi.go b/pkg/dsm/webapi/iscsi.go
-index 495effe..9f86bdc 100644
+index 495effe..ac15b00 100644
 --- a/pkg/dsm/webapi/iscsi.go
 +++ b/pkg/dsm/webapi/iscsi.go
-@@ -292,6 +292,28 @@ func (dsm *DSM) TargetSet(targetId string, maxSession int) error {
+@@ -292,6 +292,44 @@ func (dsm *DSM) TargetSet(targetId string, maxSession int) error {
  	return nil
  }
  
@@ -739,6 +476,22 @@ index 495effe..9f86bdc 100644
 +// expects auth_type "1" for CHAP (auth_type "0" disables authentication).
 +// chapUser and chapPass are the CHAP credentials the initiator must present
 +// when connecting to the target.
++//
++// ARCHITECTURE (patch 0004 — groundwork only):
++// This function exists so a future CHAP feature can configure per-target auth
++// without re-adding the webapi layer. The driver-level wiring
++// (ControllerPublishVolume reading chapUser/chapPassword from req.GetSecrets()
++// and calling service.SetTargetAuth) was removed from patch 0004 because:
++//   1. The PUBLISH_UNPUBLISH_VOLUME capability is not declared (driver.go),
++//      so ControllerPublishVolume is never called by the external-attacher.
++//   2. StorageClass `csi.storage.k8s.io/node-stage-secret` is delivered to
++//      NodeStageVolume, NOT to ControllerPublishVolume — so even if the
++//      capability were added, the secrets would not reach the handler.
++// The complete CHAP feature will require: capability declaration, a secret
++// path that actually reaches ControllerPublish (likely provisioner-secret or
++// a dedicated controller secret ref), AND a ControllerUnpublishVolume that
++// resets auth_type=0 on detach (otherwise reattach of the same target to a
++// different node fails DSM-side). Tracked, not shipped.
 +func (dsm *DSM) TargetSetAuth(targetId string, chapUser string, chapPass string) error {
 +	params := url.Values{}
 +	params.Add("api", "SYNO.Core.ISCSI.Target")
