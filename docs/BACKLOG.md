@@ -43,8 +43,8 @@ Legend: ✅ fixed here · 🔧 driver patch (our builds) · 📋 tracked upstrea
 
 | Issue | Summary | Status |
 |---|---|---|
-| [#47](https://github.com/SynologyOpenSource/synology-csi/issues/47) | Node ClusterRole can read ALL secrets | ✅ chart RBAC hardened (least privilege per component) |
-| [#30](https://github.com/SynologyOpenSource/synology-csi/issues/30) | securityContext support | ✅ hardened by default (controller/snapshotter non-root; node privileged by CSI design, documented) |
+| [#47](https://github.com/SynologyOpenSource/synology-csi/issues/47) | Node ClusterRole can read ALL secrets | ✅ réellement corrigé (RBAC node émondé, secrets retirés) — la chart ne laisse au ClusterRole node que nodes [get,list,watch] |
+| [#30](https://github.com/SynologyOpenSource/synology-csi/issues/30) | securityContext support | ✅ tous les conteneurs du chart (driver + provisioner/attacher/resizer/snapshotter/registrar) sont durcis : drop ALL caps, readOnlyRootFilesystem, seccomp RuntimeDefault ; non-root (65534) sur controller/snapshotter, root uniquement là où le hostPath l'impose (node-driver-registrar, node plugin) |
 | [#35](https://github.com/SynologyOpenSource/synology-csi/issues/35) | Don't require DSM admin account | 📋 tracked (needs DSM privilege scoping docs + validation) |
 | [#82](https://github.com/SynologyOpenSource/synology-csi/issues/82) / [#63](https://github.com/SynologyOpenSource/synology-csi/issues/63) | iSCSI targets created with no auth / CHAP support | 📋 tracked (driver feature) |
 | [#100](https://github.com/SynologyOpenSource/synology-csi/issues/100) | Security recommendations | 📋 tracked |

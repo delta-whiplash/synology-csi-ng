@@ -8,7 +8,9 @@ metadata:
     app.kubernetes.io/component: controller
 spec:
   serviceName: {{ include "synology-csi-ng.fullname" . }}-controller
-  replicas: {{ .Values.controller.replicaCount }}
+  # Leader election is NOT wired (sidecars run without --leader-election,
+  # RBAC has no leases rule) → single replica, do NOT scale up.
+  replicas: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ include "synology-csi-ng.name" . }}
@@ -35,6 +37,16 @@ spec:
           volumeMounts:
             - name: socket-dir
               mountPath: /csi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            seccompProfile:
+              type: RuntimeDefault
           resources:
             {{- toYaml .Values.controller.resources | nindent 12 }}
         - name: attacher
@@ -47,6 +59,16 @@ spec:
           volumeMounts:
             - name: socket-dir
               mountPath: /csi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            seccompProfile:
+              type: RuntimeDefault
           resources:
             {{- toYaml .Values.controller.resources | nindent 12 }}
         - name: resizer
@@ -59,6 +81,16 @@ spec:
           volumeMounts:
             - name: socket-dir
               mountPath: /csi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            seccompProfile:
+              type: RuntimeDefault
           resources:
             {{- toYaml .Values.controller.resources | nindent 12 }}
         - name: csi-plugin

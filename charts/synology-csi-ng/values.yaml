@@ -87,7 +87,6 @@ storageClasses: {}
 volumeSnapshotClasses: {}
 
 controller:
-  replicaCount: 1
   resources:
     requests:
       cpu: 25m
@@ -114,14 +113,6 @@ snapshotter:
       memory: 32Mi
     limits:
       memory: 128Mi
-
-# Namespace Pod Security: the node plugin is privileged by CSI design
-# (device nodes, mounts, chroot into the host). Controller and snapshotter
-# run hardened (non-root, no caps).
-podSecurity:
-  enforce: privileged
-  audit: privileged
-  warn: privileged
 
 nameOverride: ""
 fullnameOverride: ""
