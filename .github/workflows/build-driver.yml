@@ -235,13 +235,20 @@ jobs:
         run: |
           # New GHCR packages default to private; a CSI driver image is
           # useless to cluster nodes if they cannot pull it anonymously.
+          ok=0
           for i in $(seq 1 10); do
             if gh api --method PATCH \
                 "user/packages/container/synology-csi" \
                 -f visibility=public 2>/dev/null; then
-              echo "package set to public"; break
+              echo "package set to public"
+              ok=1
+              break
             fi
             sleep 5
           done
+          if [ "$ok" -ne 1 ]; then
+            echo "::error::failed to set GHCR package to public after 10 retries — image will be unpullable by cluster nodes"
+            exit 1
+          fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
