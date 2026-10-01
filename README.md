@@ -104,7 +104,7 @@ storageClasses:
 
 ```sh
 helm install synology-csi oci://ghcr.io/delta-whiplash/charts/synology-csi-ng \
-  --version 0.4.0 -n synology-csi --create-namespace -f values-talos.yaml
+  --version 0.4.1 -n synology-csi --create-namespace -f values-talos.yaml
 ```
 
 Classic HTTPS repo also available: `helm repo add synology-csi-ng https://delta-whiplash.github.io/synology-csi-ng`.
@@ -114,7 +114,7 @@ Classic HTTPS repo also available: `helm repo add synology-csi-ng https://delta-
 Upstream's open issues are triaged in [docs/BACKLOG.md](docs/BACKLOG.md): what each one is, whether this chart already fixes it, whether it needs a driver patch (ours or upstream's), and the link. One issue = one branch = one PR, here and upstream. Highlights:
 
 - ✅ fixed here: image publication (#149), CRI-O refs (#128/#129), OCI chart (#112), chart login failures (#105), RBAC secrets overreach (#47), securityContext (#30)
-- 🔧 driver patches applied to our builds: Talos chroot (#130/#89), NFS 2370 retry (#140/#139), NFS allowlist for NAT-ed networks (#113/#142)
+- 🔧 driver patches applied to our builds: Talos chroot (#130/#89), NFS 2370 retry (#140/#139), NFS configurable root_squash (`CSI_NFS_ROOT_SQUASH` env, default empty = no squash), NFS allowlist for NAT-ed networks (#113/#142)
 - 🔍 **a full code audit of driver v1.4.0** lives in [docs/CODE-REVIEW-v1.4.0.md](docs/CODE-REVIEW-v1.4.0.md): 4 critical (data races on DSM sessions, DSM passwords in GET query strings + debug logs, no HTTP timeouts, unrecovered panics on multipath/iSCSI parsing), 11 major (dead NVMe session detection, iSCSI targets created without auth — #82/#63 confirmed at code level, SMB passwords unescaped — #59, N+1 API storms on the kubelet stats path), 9 minor — each with file:line and a suggested fix. These findings are the roadmap for our patched builds and the material for upstream PRs.
 - 📋 tracked upstream: share naming (#121/#92/#96), capacity policy (#104/#78), and the rest of the triage in the backlog
 
@@ -129,9 +129,9 @@ If you arrived here by searching one of them: yes, this chart fixes it.
 | `Volume[UUID] is not found` at mount after a node change | Stale per-node CSI state or lost DSM export entry | Restart the node plugin DaemonSet on that node; see [docs/TESTING.md](docs/TESTING.md) |
 | `rpc.statd is not running but is required for remote locking` | NFS v3 mount without local locking (no statd on Talos/minimal hosts) | Add `mountOptions: [nolock]` to the StorageClass |
 | `Missing secrets for node staging volume` | NFS/SMB StorageClass without the DSM credentials reference | Add `csi.storage.k8s.io/node-stage-secret-name` / `-namespace` parameters |
-| DSM error `2370` when saving NFS rules | Concurrent NFS privilege saves on DSM | Driver retry/mutex fix — applied in our driver builds |
+| DSM error `2370` when saving NFS rules | Concurrent NFS privilege saves on DSM | ✅ shipped — driver retries 2370 with a 5-attempt / 2s backoff envelope at the save level, on top of the per-request retry |
 | `Already existing volume name with different capacity` | DSM truncates share names at 32 chars → name collisions between PVCs | Driver fix (hash-suffixed names) — in progress, [code review](docs/CODE-REVIEW-v1.4.0.md) finding m1 |
-| `access denied by server` on NFS mounts of driver-created shares | DSM export/squash handling of driver-created rules | Under investigation — see the NFS section of [docs/CODE-REVIEW-v1.4.0.md](docs/CODE-REVIEW-v1.4.0.md) |
+| `access denied by server` on NFS mounts of driver-created shares | DSM export/squash handling of driver-created rules | ✅ shipped — `hostTools.nfsRootSquash` chart value drives `CSI_NFS_ROOT_SQUASH` on the node plugin (default `""` = no squash, override to `"root"` / `"all"` per cluster policy) |
 | `Failed to inspect image` / short-name mode errors (CRI-O) | Unqualified image references | ✅ fixed — fully-qualified refs by default |
 
 ## Documentation

@@ -32,11 +32,11 @@ Legend: ✅ fixed here · 🔧 driver patch (our builds) · 📋 tracked upstrea
 
 | Issue | Summary | Status |
 |---|---|---|
-| [#139](https://github.com/SynologyOpenSource/synology-csi/issues/139) | CreateVolume "succeeds" while NFS privilege save failed (DSM 2370) | 🔧 PR #140 applies; patch queued for our builds |
-| [#91](https://github.com/SynologyOpenSource/synology-csi/issues/91) / [#105-adjacent] | Failed to set NFS privilege rule | 🔧 same family as #139 |
+| [#139](https://github.com/SynologyOpenSource/synology-csi/issues/139) | CreateVolume "succeeds" while NFS privilege save failed (DSM 2370) | ✅ **shipped** — driver retries 2370 at the `ShareNfsPrivilegeSave` level (cap 5 attempts, 2s constant backoff) on top of the per-request retry in `nfsPrivilegeRequest`; patch `patches/v1.4.0/0001-nfs-configurable-root-squash-and-2370-retry.patch` |
+| [#91](https://github.com/SynologyOpenSource/synology-csi/issues/91) / [#105-adjacent] | Failed to set NFS privilege rule | ✅ same fix family as #139 (shipped) |
 | [#113](https://github.com/SynologyOpenSource/synology-csi/issues/113) | NFS privilege breaks NAT-ed networks | 🔧 PR #142 (configurable allowlist) applies |
 | [#131](https://github.com/SynologyOpenSource/synology-csi/issues/131) | NodeGetVolumeStats / expand for static NFS PVs | 📋 tracked |
-| [#95](https://github.com/SynologyOpenSource/synology-csi/issues/95) | NFS export world-readable | 📋 tracked (mountPermissions plumbing exists in driver) |
+| [#95](https://github.com/SynologyOpenSource/synology-csi/issues/95) | NFS export world-readable | ✅ **shipped** — `CSI_NFS_ROOT_SQUASH` env (chart value `hostTools.nfsRootSquash`, default `""` = no squash) lets operators override the upstream hardcoded `"root"` per call |
 | **32-char truncation** (undocumented upstream) | DSM truncates share names at 32 chars; driver mounts the full name → every NFS PVC fails to publish | 🔧 **our own finding** — patch designed (consistent truncated naming), PR upstream planned |
 
 ## Security
