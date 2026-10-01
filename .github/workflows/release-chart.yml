@@ -23,6 +23,20 @@ jobs:
       - name: helm lint (gate)
         run: helm lint charts/synology-csi-ng --strict
 
+      - name: Tag/Chart.yaml version consistency (gate)
+        run: |
+          # The triggering tag MUST be chart-v<Chart.yaml version>. A
+          # mismatch means someone tagged a release without bumping the
+          # chart version (or vice versa) — refuse to publish silently.
+          TAG="${GITHUB_REF#refs/tags/chart-v}"
+          CHART_VERSION=$(sed -n 's/^version: //p' charts/synology-csi-ng/Chart.yaml)
+          echo "tag version:     $TAG"
+          echo "Chart.yaml version: $CHART_VERSION"
+          if [ "$TAG" != "$CHART_VERSION" ]; then
+            echo "::error::tag chart-v${TAG} does not match Chart.yaml version ${CHART_VERSION}"
+            exit 1
+          fi
+
       - name: Login to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
 
