@@ -249,7 +249,7 @@ The driver hardcodes `RootSquash: "root"` in `pkg/driver/nodeserver.go:460`. Thi
 
 **4. Check the share name truncation**
 
-If the share name on DSM is truncated to 32 chars but the driver tries to mount the full name, the mount fails. See `docs/DISASTER-RECOVERY.md` — this is patched in our builds.
+If the share name on DSM is truncated to 32 chars but the driver mounts the full name, the mount fails server-side. NOTE: this is an upstream bug on the mount path, NOT fixed in our builds — see `docs/CODE-REVIEW-v1.4.0.md` (finding m1).
 
 **5. Check DSM logs**
 
