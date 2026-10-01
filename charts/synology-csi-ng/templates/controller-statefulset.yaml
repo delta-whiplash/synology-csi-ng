@@ -1,28 +1,28 @@
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: {{ include "synology-csi-talos-ng.fullname" . }}-controller
+  name: {{ include "synology-csi-ng.fullname" . }}-controller
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "synology-csi-talos-ng.labels" . | nindent 4 }}
+    {{- include "synology-csi-ng.labels" . | nindent 4 }}
     app.kubernetes.io/component: controller
 spec:
-  serviceName: {{ include "synology-csi-talos-ng.fullname" . }}-controller
+  serviceName: {{ include "synology-csi-ng.fullname" . }}-controller
   replicas: {{ .Values.controller.replicaCount }}
   selector:
     matchLabels:
-      app.kubernetes.io/name: {{ include "synology-csi-talos-ng.name" . }}
+      app.kubernetes.io/name: {{ include "synology-csi-ng.name" . }}
       app.kubernetes.io/instance: {{ .Release.Name }}
       app.kubernetes.io/component: controller
   template:
     metadata:
       labels:
-        {{- include "synology-csi-talos-ng.labels" . | nindent 8 }}
+        {{- include "synology-csi-ng.labels" . | nindent 8 }}
         app.kubernetes.io/component: controller
     spec:
       securityContext:
         fsGroup: 65534
-      serviceAccountName: {{ include "synology-csi-talos-ng.fullname" . }}-controller
+      serviceAccountName: {{ include "synology-csi-ng.fullname" . }}-controller
       containers:
         - name: provisioner
           image: "{{ .Values.sidecars.provisioner.image }}:{{ .Values.sidecars.provisioner.tag }}"
@@ -62,7 +62,7 @@ spec:
           resources:
             {{- toYaml .Values.controller.resources | nindent 12 }}
         - name: csi-plugin
-          image: {{ include "synology-csi-talos-ng.driverImage" . }}
+          image: {{ include "synology-csi-ng.driverImage" . }}
           imagePullPolicy: {{ .Values.driver.pullPolicy }}
           args:
             - --client-info=/etc/synology/client-info.yml
@@ -79,7 +79,7 @@ spec:
               readOnly: true
             - name: tmp
               mountPath: /tmp
-          {{- include "synology-csi-talos-ng.hardenedSecurityContext" . | nindent 10 }}
+          {{- include "synology-csi-ng.hardenedSecurityContext" . | nindent 10 }}
           resources:
             {{- toYaml .Values.controller.resources | nindent 12 }}
       volumes:
@@ -89,4 +89,4 @@ spec:
           emptyDir: {}
         - name: client-info
           secret:
-            secretName: {{ include "synology-csi-talos-ng.clientInfoSecretName" . }}
+            secretName: {{ include "synology-csi-ng.clientInfoSecretName" . }}

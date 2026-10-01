@@ -1,24 +1,24 @@
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: {{ include "synology-csi-talos-ng.fullname" . }}-node
+  name: {{ include "synology-csi-ng.fullname" . }}-node
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "synology-csi-talos-ng.labels" . | nindent 4 }}
+    {{- include "synology-csi-ng.labels" . | nindent 4 }}
     app.kubernetes.io/component: node
 spec:
   selector:
     matchLabels:
-      app.kubernetes.io/name: {{ include "synology-csi-talos-ng.name" . }}
+      app.kubernetes.io/name: {{ include "synology-csi-ng.name" . }}
       app.kubernetes.io/instance: {{ .Release.Name }}
       app.kubernetes.io/component: node
   template:
     metadata:
       labels:
-        {{- include "synology-csi-talos-ng.labels" . | nindent 8 }}
+        {{- include "synology-csi-ng.labels" . | nindent 8 }}
         app.kubernetes.io/component: node
     spec:
-      serviceAccountName: {{ include "synology-csi-talos-ng.fullname" . }}-node
+      serviceAccountName: {{ include "synology-csi-ng.fullname" . }}-node
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
       containers:
@@ -42,7 +42,7 @@ spec:
           resources:
             {{- toYaml .Values.node.resources | nindent 12 }}
         - name: csi-plugin
-          image: {{ include "synology-csi-talos-ng.driverImage" . }}
+          image: {{ include "synology-csi-ng.driverImage" . }}
           imagePullPolicy: {{ .Values.driver.pullPolicy }}
           args:
             - --client-info=/etc/synology/client-info.yml
@@ -102,7 +102,7 @@ spec:
       volumes:
         - name: client-info
           secret:
-            secretName: {{ include "synology-csi-talos-ng.clientInfoSecretName" . }}
+            secretName: {{ include "synology-csi-ng.clientInfoSecretName" . }}
         - name: device-dir
           hostPath:
             path: /dev

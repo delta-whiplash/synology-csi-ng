@@ -25,11 +25,11 @@ jobs:
           version: v3.14.4
 
       - name: helm lint
-        run: helm lint charts/synology-csi-talos-ng --strict
+        run: helm lint charts/synology-csi-ng --strict
 
       - name: helm template (Talos profile)
         run: |
-          helm template test charts/synology-csi-talos-ng \
+          helm template test charts/synology-csi-ng \
             --set hostTools.iscsiadmPath=/usr/local/sbin/iscsiadm \
             --set storageClasses.iscsi-delete.reclaimPolicy=Delete \
             --set storageClasses.iscsi-delete.parameters.fsType=xfs \

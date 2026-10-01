@@ -1,4 +1,4 @@
-# Default values for synology-csi-talos-ng.
+# Default values for synology-csi-ng.
 # Deploy the OFFICIAL synology/synology-csi driver images with the
 # deployment configuration they need (chroot into the host, host binary
 # paths) — see README.md for the why.

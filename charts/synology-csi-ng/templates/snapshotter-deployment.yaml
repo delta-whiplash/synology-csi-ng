@@ -2,10 +2,10 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "synology-csi-talos-ng.fullname" . }}-snapshotter
+  name: {{ include "synology-csi-ng.fullname" . }}-snapshotter
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "synology-csi-talos-ng.labels" . | nindent 4 }}
+    {{- include "synology-csi-ng.labels" . | nindent 4 }}
     app.kubernetes.io/component: snapshotter
 spec:
   replicas: 1
@@ -13,18 +13,18 @@ spec:
     type: Recreate
   selector:
     matchLabels:
-      app.kubernetes.io/name: {{ include "synology-csi-talos-ng.name" . }}
+      app.kubernetes.io/name: {{ include "synology-csi-ng.name" . }}
       app.kubernetes.io/instance: {{ .Release.Name }}
       app.kubernetes.io/component: snapshotter
   template:
     metadata:
       labels:
-        {{- include "synology-csi-talos-ng.labels" . | nindent 8 }}
+        {{- include "synology-csi-ng.labels" . | nindent 8 }}
         app.kubernetes.io/component: snapshotter
     spec:
       securityContext:
         fsGroup: 65534
-      serviceAccountName: {{ include "synology-csi-talos-ng.fullname" . }}-snapshotter
+      serviceAccountName: {{ include "synology-csi-ng.fullname" . }}-snapshotter
       containers:
         - name: snapshotter
           image: "{{ .Values.sidecars.snapshotter.image }}:{{ .Values.sidecars.snapshotter.tag }}"
@@ -40,7 +40,7 @@ spec:
           resources:
             {{- toYaml .Values.snapshotter.resources | nindent 12 }}
         - name: csi-plugin
-          image: {{ include "synology-csi-talos-ng.driverImage" . }}
+          image: {{ include "synology-csi-ng.driverImage" . }}
           imagePullPolicy: {{ .Values.driver.pullPolicy }}
           args:
             - --client-info=/etc/synology/client-info.yml
@@ -57,7 +57,7 @@ spec:
               readOnly: true
             - name: tmp
               mountPath: /tmp
-          {{- include "synology-csi-talos-ng.hardenedSecurityContext" . | nindent 10 }}
+          {{- include "synology-csi-ng.hardenedSecurityContext" . | nindent 10 }}
           resources:
             {{- toYaml .Values.snapshotter.resources | nindent 12 }}
       volumes:
@@ -67,5 +67,5 @@ spec:
           emptyDir: {}
         - name: client-info
           secret:
-            secretName: {{ include "synology-csi-talos-ng.clientInfoSecretName" . }}
+            secretName: {{ include "synology-csi-ng.clientInfoSecretName" . }}
 {{- end }}

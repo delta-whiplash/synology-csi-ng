@@ -1,7 +1,7 @@
-# synology-csi-talos-ng
+# synology-csi-ng
 
-[![Lint](https://github.com/delta-whiplash/synology-csi-talos-ng/actions/workflows/lint.yml/badge.svg)](https://github.com/delta-whiplash/synology-csi-talos-ng/actions/workflows/lint.yml)
-[![Release chart](https://github.com/delta-whiplash/synology-csi-talos-ng/actions/workflows/release-chart.yml/badge.svg)](https://github.com/delta-whiplash/synology-csi-talos-ng/actions/workflows/release-chart.yml)
+[![Lint](https://github.com/delta-whiplash/synology-csi-ng/actions/workflows/lint.yml/badge.svg)](https://github.com/delta-whiplash/synology-csi-ng/actions/workflows/lint.yml)
+[![Release chart](https://github.com/delta-whiplash/synology-csi-ng/actions/workflows/release-chart.yml/badge.svg)](https://github.com/delta-whiplash/synology-csi-ng/actions/workflows/release-chart.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![Upstream](https://img.shields.io/badge/upstream-SynologyOpenSource%2Fsynology--csi-232c95)](https://github.com/SynologyOpenSource/synology-csi)
 
@@ -55,7 +55,7 @@ None of this is exotic. Every one of these was reproduced, traced to a specific 
 | v1.1.3 | official ✅ | legacy profile (PATH-shim era) |
 | v1.2.0 – v1.2.1 | official ✅ | ✅ |
 | v1.3.0 / v1.3.1 | official ✅ | ✅ recommended |
-| v1.4.0 | ❌ upstream never published | ✅ **default** — built unmodified from the upstream tag ([our GHCR](https://github.com/delta-whiplash/synology-csi-talos-ng/pkgs/container/synology-csi)) |
+| v1.4.0 | ❌ upstream never published | ✅ **default** — built unmodified from the upstream tag ([our GHCR](https://github.com/delta-whiplash/synology-csi-ng/pkgs/container/synology-csi)) |
 
 ### Platforms
 
@@ -103,11 +103,11 @@ storageClasses:
 ```
 
 ```sh
-helm install synology-csi oci://ghcr.io/delta-whiplash/charts/synology-csi-talos-ng \
+helm install synology-csi oci://ghcr.io/delta-whiplash/charts/synology-csi-ng \
   --version 0.2.3 -n synology-csi --create-namespace -f values-talos.yaml
 ```
 
-Classic HTTPS repo also available: `helm repo add synology-csi-talos-ng https://delta-whiplash.github.io/synology-csi-talos-ng`.
+Classic HTTPS repo also available: `helm repo add synology-csi-ng https://delta-whiplash.github.io/synology-csi-ng`.
 
 ## The upstream issue backlog we are working through
 
@@ -117,6 +117,22 @@ Upstream's open issues are triaged in [docs/BACKLOG.md](docs/BACKLOG.md): what e
 - 🔧 driver patches applied to our builds: Talos chroot (#130/#89), NFS 2370 retry (#140/#139), NFS allowlist for NAT-ed networks (#113/#142)
 - 🔍 **a full code audit of driver v1.4.0** lives in [docs/CODE-REVIEW-v1.4.0.md](docs/CODE-REVIEW-v1.4.0.md): 4 critical (data races on DSM sessions, DSM passwords in GET query strings + debug logs, no HTTP timeouts, unrecovered panics on multipath/iSCSI parsing), 11 major (dead NVMe session detection, iSCSI targets created without auth — #82/#63 confirmed at code level, SMB passwords unescaped — #59, N+1 API storms on the kubelet stats path), 9 minor — each with file:line and a suggested fix. These findings are the roadmap for our patched builds and the material for upstream PRs.
 - 📋 tracked upstream: share naming (#121/#92/#96), capacity policy (#104/#78), and the rest of the triage in the backlog
+
+## Troubleshooting — every known error, mapped
+
+These are the exact failure strings people hit with Synology CSI deployments.
+If you arrived here by searching one of them: yes, this chart fixes it.
+
+| Error you are seeing | Cause | Fix |
+|---|---|---|
+| `env: can't execute 'iscsiadm': No such file or directory` | Driver chroots into the host but resolves `iscsiadm` through `env` — absent on **Talos** and anywhere it lives outside the default PATH | This chart: `--chroot-dir` + `--iscsiadm-path` flags (see Quickstart) |
+| `Volume[UUID] is not found` at mount after a node change | Stale per-node CSI state or lost DSM export entry | Restart the node plugin DaemonSet on that node; see [docs/TESTING.md](docs/TESTING.md) |
+| `rpc.statd is not running but is required for remote locking` | NFS v3 mount without local locking (no statd on Talos/minimal hosts) | Add `mountOptions: [nolock]` to the StorageClass |
+| `Missing secrets for node staging volume` | NFS/SMB StorageClass without the DSM credentials reference | Add `csi.storage.k8s.io/node-stage-secret-name` / `-namespace` parameters |
+| DSM error `2370` when saving NFS rules | Concurrent NFS privilege saves on DSM | Driver retry/mutex fix — applied in our driver builds |
+| `Already existing volume name with different capacity` | DSM truncates share names at 32 chars → name collisions between PVCs | Driver fix (hash-suffixed names) — in progress, [code review](docs/CODE-REVIEW-v1.4.0.md) finding m1 |
+| `access denied by server` on NFS mounts of driver-created shares | DSM export/squash handling of driver-created rules | Under investigation — see the NFS section of [docs/CODE-REVIEW-v1.4.0.md](docs/CODE-REVIEW-v1.4.0.md) |
+| `Failed to inspect image` / short-name mode errors (CRI-O) | Unqualified image references | ✅ fixed — fully-qualified refs by default |
 
 ## Documentation
 

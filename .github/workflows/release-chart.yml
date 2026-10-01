@@ -21,22 +21,22 @@ jobs:
           version: v3.14.4
 
       - name: helm lint (gate)
-        run: helm lint charts/synology-csi-talos-ng --strict
+        run: helm lint charts/synology-csi-ng --strict
 
       - name: Login to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
 
       - name: Package and push to OCI (primary distribution)
         run: |
-          VERSION=$(sed -n 's/^version: //p' charts/synology-csi-talos-ng/Chart.yaml)
-          helm package charts/synology-csi-talos-ng --version "$VERSION"
-          helm push synology-csi-talos-ng-"$VERSION".tgz oci://ghcr.io/${{ github.repository_owner }}/charts
+          VERSION=$(sed -n 's/^version: //p' charts/synology-csi-ng/Chart.yaml)
+          helm package charts/synology-csi-ng --version "$VERSION"
+          helm push synology-csi-ng-"$VERSION".tgz oci://ghcr.io/${{ github.repository_owner }}/charts
 
       - name: Publish classic HTTPS repo (gh-pages)
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          mkdir -p /tmp/chart-repo && helm package charts/synology-csi-talos-ng --destination /tmp/chart-repo
+          mkdir -p /tmp/chart-repo && helm package charts/synology-csi-ng --destination /tmp/chart-repo
           helm repo index /tmp/chart-repo --url https://${{ github.repository_owner }}.github.io/$(basename ${{ github.repository }})
           git fetch origin gh-pages || git checkout --orphan gh-pages
           git checkout gh-pages 2>/dev/null || git checkout -b gh-pages

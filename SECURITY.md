@@ -2,7 +2,7 @@
 
 ## Reporting a vulnerability
 
-Open a [GitHub security advisory](https://github.com/delta-whiplash/synology-csi-talos-ng/security/advisories/new) rather than a public issue.
+Open a [GitHub security advisory](https://github.com/delta-whiplash/synology-csi-ng/security/advisories/new) rather than a public issue.
 
 This repository ships a **Helm chart** and deployment configuration for the
 official [Synology CSI driver](https://github.com/SynologyOpenSource/synology-csi).

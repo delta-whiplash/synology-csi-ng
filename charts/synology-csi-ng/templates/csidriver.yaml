@@ -3,7 +3,7 @@ kind: CSIDriver
 metadata:
   name: csi.san.synology.com
   labels:
-    {{- include "synology-csi-talos-ng.labels" . | nindent 4 }}
+    {{- include "synology-csi-ng.labels" . | nindent 4 }}
 spec:
   attachRequired: true
   podInfoOnMount: true

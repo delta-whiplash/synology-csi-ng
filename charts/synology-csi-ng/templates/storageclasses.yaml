@@ -6,7 +6,7 @@ metadata:
   annotations:
     storageclass.kubernetes.io/is-default-class: {{ default "false" $sc.isDefault | quote }}
   labels:
-    {{- include "synology-csi-talos-ng.labels" $ | nindent 4 }}
+    {{- include "synology-csi-ng.labels" $ | nindent 4 }}
 provisioner: csi.san.synology.com
 reclaimPolicy: {{ default "Delete" $sc.reclaimPolicy }}
 volumeBindingMode: {{ default "Immediate" $sc.volumeBindingMode }}
@@ -23,7 +23,7 @@ kind: VolumeSnapshotClass
 metadata:
   name: {{ $name }}
   labels:
-    {{- include "synology-csi-talos-ng.labels" $ | nindent 4 }}
+    {{- include "synology-csi-ng.labels" $ | nindent 4 }}
 driver: csi.san.synology.com
 deletionPolicy: {{ $policy }}
 ---
