@@ -1,0 +1,470 @@
+diff --git a/pkg/driver/capacity_clamp_test.go b/pkg/driver/capacity_clamp_test.go
+new file mode 100644
+index 0000000..50ff762
+--- /dev/null
++++ b/pkg/driver/capacity_clamp_test.go
+@@ -0,0 +1,126 @@
++package driver
++
++import (
++	"context"
++	"testing"
++
++	"github.com/container-storage-interface/spec/lib/go/csi"
++
++	"github.com/SynologyOpenSource/synology-csi/pkg/dsm/common"
++	"github.com/SynologyOpenSource/synology-csi/pkg/dsm/webapi"
++	"github.com/SynologyOpenSource/synology-csi/pkg/models"
++	"github.com/SynologyOpenSource/synology-csi/pkg/utils"
++)
++
++// recordingDsmService captures the CreateK8sVolumeSpec handed to CreateVolume,
++// so the clamp can be verified without running a real DSM.
++type recordingDsmService struct {
++	lookupFailingService
++	lastCreateSpec *models.CreateK8sVolumeSpec
++}
++
++func (s *recordingDsmService) GetVolumeByName(volName string) (*models.K8sVolumeRespSpec, error) {
++	return nil, nil // does not exist → CreateVolume will be called
++}
++
++func (s *recordingDsmService) CreateVolume(spec *models.CreateK8sVolumeSpec) (*models.K8sVolumeRespSpec, error) {
++	s.lastCreateSpec = spec
++	return &models.K8sVolumeRespSpec{
++		VolumeId:    "vol-record",
++		SizeInBytes: spec.Size,
++		Protocol:    utils.ProtocolIscsi,
++	}, nil
++}
++
++func (s *recordingDsmService) AddDsm(client common.ClientInfo) error { return nil }
++func (s *recordingDsmService) RemoveAllDsms()                        {}
++func (s *recordingDsmService) GetDsm(ip string) (*webapi.DSM, error) {
++	return nil, nil
++}
++func (s *recordingDsmService) GetDsmsCount() int { return 1 }
++func (s *recordingDsmService) ListDsmVolumes(ip string) ([]webapi.VolInfo, error) {
++	return nil, nil
++}
++func (s *recordingDsmService) DeleteVolume(volId string) error { return nil }
++func (s *recordingDsmService) ExpandVolume(volId string, newSize int64) (*models.K8sVolumeRespSpec, error) {
++	return nil, nil
++}
++func (s *recordingDsmService) CreateSnapshot(spec *models.CreateK8sVolumeSnapshotSpec) (*models.K8sSnapshotRespSpec, error) {
++	return nil, nil
++}
++func (s *recordingDsmService) DeleteSnapshot(snapshotUuid string) error        { return nil }
++func (s *recordingDsmService) ListAllSnapshots() []*models.K8sSnapshotRespSpec { return nil }
++func (s *recordingDsmService) ListSnapshots(volId string) []*models.K8sSnapshotRespSpec {
++	return nil
++}
++func (s *recordingDsmService) GetSnapshotByName(snapshotName string) *models.K8sSnapshotRespSpec {
++	return nil
++}
++func (s *recordingDsmService) GetVolume(volId string) (*models.K8sVolumeRespSpec, error) {
++	return nil, nil
++}
++func (s *recordingDsmService) ListVolumes() ([]*models.K8sVolumeRespSpec, error) {
++	return nil, nil
++}
++
++// baseCreateVolumeRequest returns a CreateVolumeRequest with a valid capability
++// and the given capacity; parameters satisfy the minimum path through
++// CreateVolume so the capacity clamp is the thing under test.
++func baseCreateVolumeRequest(requiredBytes int64) *csi.CreateVolumeRequest {
++	return &csi.CreateVolumeRequest{
++		Name:          "pvc-104",
++		CapacityRange: &csi.CapacityRange{RequiredBytes: requiredBytes},
++		VolumeCapabilities: []*csi.VolumeCapability{{
++			AccessType: &csi.VolumeCapability_Mount{Mount: &csi.VolumeCapability_MountVolume{}},
++			AccessMode: &csi.VolumeCapability_AccessMode{Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER},
++		}},
++		Parameters: map[string]string{
++			"dsm":      "1.2.3.4",
++			"protocol": "iscsi",
++			"location": "/volume1",
++			"type":     "thin",
++		},
++	}
++}
++
++// TestCreateVolume_ClampsSmallCapacityToMinimum — issue #104.
++// Synology DSM rejects LUNs smaller than ~1 GiB. The driver must clamp tiny
++// requests up to minVolumeSizeBytes (1 GiB) instead of failing.
++func TestCreateVolume_ClampsSmallCapacityToMinimum(t *testing.T) {
++	svc := &recordingDsmService{}
++	cs := &controllerServer{Driver: testDriver(), dsmService: svc}
++
++	// 10 MiB — way below the DSM minimum.
++	req := baseCreateVolumeRequest(10 * 1024 * 1024)
++	resp, err := cs.CreateVolume(context.Background(), req)
++	if err != nil {
++		t.Fatalf("CreateVolume(10Mi) errored: %v; expected a clamp, not a rejection", err)
++	}
++	if svc.lastCreateSpec == nil {
++		t.Fatal("CreateVolume was not forwarded to DSM service")
++	}
++	if svc.lastCreateSpec.Size != int64(minVolumeSizeBytes) {
++		t.Errorf("DSM received size %d, want %d (clamped to minVolumeSizeBytes)", svc.lastCreateSpec.Size, int64(minVolumeSizeBytes))
++	}
++	if resp.Volume.CapacityBytes != int64(minVolumeSizeBytes) {
++		t.Errorf("response CapacityBytes = %d, want %d", resp.Volume.CapacityBytes, int64(minVolumeSizeBytes))
++	}
++}
++
++// TestCreateVolume_LeavesLargerCapacityAlone — 5 Gi must pass through unchanged.
++func TestCreateVolume_LeavesLargerCapacityAlone(t *testing.T) {
++	svc := &recordingDsmService{}
++	cs := &controllerServer{Driver: testDriver(), dsmService: svc}
++
++	fiveGi := int64(5) * int64(utils.UNIT_GB)
++	req := baseCreateVolumeRequest(fiveGi)
++	if _, err := cs.CreateVolume(context.Background(), req); err != nil {
++		t.Fatalf("CreateVolume(5Gi) errored: %v", err)
++	}
++	if svc.lastCreateSpec == nil {
++		t.Fatal("CreateVolume was not forwarded to DSM service")
++	}
++	if svc.lastCreateSpec.Size != fiveGi {
++		t.Errorf("DSM received size %d, want %d (5 Gi unchanged)", svc.lastCreateSpec.Size, fiveGi)
++	}
++}
+diff --git a/pkg/driver/controllerserver.go b/pkg/driver/controllerserver.go
+index bf7215e..03f3983 100644
+--- a/pkg/driver/controllerserver.go
++++ b/pkg/driver/controllerserver.go
+@@ -23,6 +23,7 @@ import (
+ 	"strconv"
+ 	"strings"
+ 	"time"
++	"unicode"
+ 
+ 	log "github.com/sirupsen/logrus"
+ 
+@@ -42,9 +43,14 @@ type controllerServer struct {
+ 	Initiator  *initiatorDriver
+ }
+ 
++// minVolumeSizeBytes is the DSM-side sane minimum for a LUN/namespace. Synology
++// DSM rejects very small volumes with obscure error codes, so the driver clamps
++// smaller requests up to this value rather than failing (issue #104).
++const minVolumeSizeBytes = 1 * utils.UNIT_GB // 1 GiB
++
+ func getSizeByCapacityRange(capRange *csi.CapacityRange) (int64, error) {
+ 	if capRange == nil {
+-		return 1 * utils.UNIT_GB, nil
++		return minVolumeSizeBytes, nil
+ 	}
+ 
+ 	minSize := capRange.GetRequiredBytes()
+@@ -52,8 +58,17 @@ func getSizeByCapacityRange(capRange *csi.CapacityRange) (int64, error) {
+ 	if 0 < maxSize && maxSize < minSize {
+ 		return 0, status.Error(codes.InvalidArgument, "Invalid input: limitBytes is smaller than requiredBytes")
+ 	}
+-	if minSize < utils.UNIT_GB {
+-		return 0, status.Error(codes.InvalidArgument, "Invalid input: required bytes is smaller than 1G")
++
++	// Clamp to the DSM minimum instead of rejecting tiny requests — a 10 MiB
++	// PVC is honored as a 1 GiB LUN (issue #104).
++	if minSize < minVolumeSizeBytes {
++		minSize = minVolumeSizeBytes
++	}
++
++	// Respect the user's upper bound: if they asked for < minVolumeSizeBytes
++	// with a tight limit, the clamp would violate the limit.
++	if 0 < maxSize && maxSize < minSize {
++		return 0, status.Error(codes.InvalidArgument, "Invalid input: limitBytes is smaller than the DSM minimum")
+ 	}
+ 
+ 	return int64(minSize), nil
+@@ -66,6 +81,22 @@ func isShareProtocol(protocol string) bool {
+ 	return protocol == utils.ProtocolNfs || protocol == utils.ProtocolSmb
+ }
+ 
++// sanitizeDescriptionNamespace makes a Kubernetes namespace safe for inclusion
++// in a Synology LUN/namespace description. DSM rejects descriptions that are
++// empty or digits-only (error 18990403); prefixing "ns-" guarantees at least
++// one non-digit character while keeping the value recognisable. (issue #134)
++func sanitizeDescriptionNamespace(ns string) string {
++	if ns == "" {
++		return "ns-"
++	}
++	for _, r := range ns {
++		if !unicode.IsDigit(r) {
++			return ns
++		}
++	}
++	return "ns-" + ns
++}
++
+ func (cs *controllerServer) isVolumeAccessModeSupport(mode csi.VolumeCapability_AccessMode_Mode) bool {
+ 	for _, accessMode := range cs.Driver.getVolumeCapabilityAccessModes() {
+ 		if mode == accessMode.Mode {
+@@ -203,7 +234,9 @@ func (cs *controllerServer) CreateVolume(ctx context.Context, req *csi.CreateVol
+ 		// as these parameters are reserved by external-provisioner
+ 		pvcNamespace := params["csi.storage.k8s.io/pvc/namespace"]
+ 		pvcName := params["csi.storage.k8s.io/pvc/name"]
+-		description = pvcNamespace + "/" + pvcName
++		// Sanitize the namespace: DSM rejects descriptions whose namespace
++		// component is empty or digits-only (issue #134).
++		description = sanitizeDescriptionNamespace(pvcNamespace) + "/" + pvcName
+ 	}
+ 
+ 	nfsVer := parseNfsVesrion(mountOptions)
+diff --git a/pkg/driver/namespace_validation_test.go b/pkg/driver/namespace_validation_test.go
+new file mode 100644
+index 0000000..723ed77
+--- /dev/null
++++ b/pkg/driver/namespace_validation_test.go
+@@ -0,0 +1,102 @@
++package driver
++
++import (
++	"context"
++	"testing"
++
++	"github.com/container-storage-interface/spec/lib/go/csi"
++
++	"github.com/SynologyOpenSource/synology-csi/pkg/utils"
++)
++
++// TestSanitizeDescriptionNamespace — issue #134.
++// Synology DSM rejects LUN/namespace descriptions whose namespace component is
++// empty or digits-only (error 18990403). The helper must prefix "ns-" in those
++// cases and leave non-empty alphabetic namespaces alone.
++func TestSanitizeDescriptionNamespace(t *testing.T) {
++	tests := []struct {
++		name string
++		in   string
++		want string
++	}{
++		{name: "digits only", in: "12345", want: "ns-12345"},
++		{name: "pure number with leading zero", in: "007", want: "ns-007"},
++		{name: "single digit", in: "7", want: "ns-7"},
++		{name: "empty", in: "", want: "ns-"},
++		{name: "alpha prefix unchanged", in: "pvc-x", want: "pvc-x"},
++		{name: "mixed alphanumeric unchanged", in: "ns123abc", want: "ns123abc"},
++		{name: "uuid-style unchanged", in: "a1b2c3d4-e5f6", want: "a1b2c3d4-e5f6"},
++	}
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			got := sanitizeDescriptionNamespace(tt.in)
++			if got != tt.want {
++				t.Errorf("sanitizeDescriptionNamespace(%q) = %q, want %q", tt.in, got, tt.want)
++			}
++		})
++	}
++}
++
++// TestCreateVolume_DescriptionNamespaceDigits — end-to-end: a PVC with a
++// digits-only namespace must land on the DSM with "ns-" prefixed.
++func TestCreateVolume_DescriptionNamespaceDigits(t *testing.T) {
++	svc := &recordingDsmService{}
++	cs := &controllerServer{Driver: testDriver(), dsmService: svc}
++
++	req := &csi.CreateVolumeRequest{
++		Name:          "pvc-134",
++		CapacityRange: &csi.CapacityRange{RequiredBytes: int64(utils.UNIT_GB)},
++		VolumeCapabilities: []*csi.VolumeCapability{{
++			AccessType: &csi.VolumeCapability_Mount{Mount: &csi.VolumeCapability_MountVolume{}},
++			AccessMode: &csi.VolumeCapability_AccessMode{Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER},
++		}},
++		Parameters: map[string]string{
++			"dsm":                                  "1.2.3.4",
++			"protocol":                             "iscsi",
++			"location":                             "/volume1",
++			"type":                                 "thin",
++			"csi.storage.k8s.io/pvc/name":          "data",
++			"csi.storage.k8s.io/pvc/namespace":     "12345",
++		},
++	}
++
++	if _, err := cs.CreateVolume(context.Background(), req); err != nil {
++		t.Fatalf("CreateVolume errored: %v", err)
++	}
++	if svc.lastCreateSpec == nil {
++		t.Fatal("CreateVolume was not forwarded to DSM service")
++	}
++	if svc.lastCreateSpec.Description != "ns-12345/data" {
++		t.Errorf("DSM description = %q, want %q", svc.lastCreateSpec.Description, "ns-12345/data")
++	}
++}
++
++// TestCreateVolume_DescriptionNamespaceAlpha — alphabetic namespace must pass through unchanged.
++func TestCreateVolume_DescriptionNamespaceAlpha(t *testing.T) {
++	svc := &recordingDsmService{}
++	cs := &controllerServer{Driver: testDriver(), dsmService: svc}
++
++	req := &csi.CreateVolumeRequest{
++		Name:          "pvc-134-alpha",
++		CapacityRange: &csi.CapacityRange{RequiredBytes: int64(utils.UNIT_GB)},
++		VolumeCapabilities: []*csi.VolumeCapability{{
++			AccessType: &csi.VolumeCapability_Mount{Mount: &csi.VolumeCapability_MountVolume{}},
++			AccessMode: &csi.VolumeCapability_AccessMode{Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER},
++		}},
++		Parameters: map[string]string{
++			"dsm":                                  "1.2.3.4",
++			"protocol":                             "iscsi",
++			"location":                             "/volume1",
++			"type":                                 "thin",
++			"csi.storage.k8s.io/pvc/name":          "data",
++			"csi.storage.k8s.io/pvc/namespace":     "pvc-x",
++		},
++	}
++
++	if _, err := cs.CreateVolume(context.Background(), req); err != nil {
++		t.Fatalf("CreateVolume errored: %v", err)
++	}
++	if svc.lastCreateSpec.Description != "pvc-x/data" {
++		t.Errorf("DSM description = %q, want %q", svc.lastCreateSpec.Description, "pvc-x/data")
++	}
++}
+diff --git a/pkg/utils/hostexec/hostexec.go b/pkg/utils/hostexec/hostexec.go
+index d961ab1..976a522 100644
+--- a/pkg/utils/hostexec/hostexec.go
++++ b/pkg/utils/hostexec/hostexec.go
+@@ -62,6 +62,27 @@ func (h *hostexec) wrapEnv(cmd string, args ...string) (string, []string) {
+ 		return cmd, args
+ 	}
+ 
++	// Talos chroots do not ship /usr/bin/env. When the chroot has no env,
++	// resolve the binary directly under the chroot using defaultSearchPath
++	// and return its chroot-relative path so wrapChroot can execute it
++	// without the env indirection (issue #130).
++	if h.chrootDir != "" {
++		envInChroot := h.chrootDir + "/usr/bin/env"
++		if _, err := os.Stat(envInChroot); err != nil {
++			for _, dir := range defaultSearchPath {
++				candidate := h.chrootDir + dir + "/" + cmd
++				if fi, err := os.Stat(candidate); err == nil && !fi.IsDir() {
++					// chroot-relative path: contains a slash so GNU chroot
++					// treats it as a path inside the new root rather than
++					// looking it up through PATH.
++					return strings.TrimPrefix(dir, "/") + "/" + cmd, args
++				}
++			}
++			// Not found in the chroot; fall through to the env path and let
++			// execution fail as before.
++		}
++	}
++
+ 	sp := fmt.Sprintf("PATH=%s", strings.Join(defaultSearchPath, ":"))
+ 	args = append([]string{"-i", sp, cmd}, args...)
+ 	cmd = "/usr/bin/env"
+diff --git a/pkg/utils/hostexec/hostexec_talos_test.go b/pkg/utils/hostexec/hostexec_talos_test.go
+new file mode 100644
+index 0000000..e36876a
+--- /dev/null
++++ b/pkg/utils/hostexec/hostexec_talos_test.go
+@@ -0,0 +1,110 @@
++package hostexec
++
++import (
++	"os"
++	"path/filepath"
++	"reflect"
++	"strings"
++	"testing"
++)
++
++// TestWrapEnv_TalosChroot_NoEnv covers issue #130: Talos chroots do not ship
++// /usr/bin/env, so wrapEnv must not prepend it. Instead the binary is resolved
++// via defaultSearchPath inside the chroot and the chroot-relative path is
++// returned so wrapChroot can execute it directly.
++func TestWrapEnv_TalosChroot_NoEnv(t *testing.T) {
++	tmpDir := t.TempDir()
++
++	// Lay down usr/local/sbin/iscsiadm inside the fake chroot.
++	iscsiadmDir := filepath.Join(tmpDir, "usr/local/sbin")
++	if err := os.MkdirAll(iscsiadmDir, 0755); err != nil {
++		t.Fatalf("MkdirAll: %v", err)
++	}
++	if err := os.WriteFile(filepath.Join(iscsiadmDir, "iscsiadm"), []byte("#!/bin/sh\n"), 0755); err != nil {
++		t.Fatalf("WriteFile iscsiadm: %v", err)
++	}
++	// Deliberately do NOT create usr/bin/env.
++
++	h := &hostexec{chrootDir: tmpDir}
++	cmd, args := h.wrapEnv("iscsiadm", "-m", "node")
++
++	if cmd != "usr/local/sbin/iscsiadm" {
++		t.Errorf("wrapEnv() cmd = %q, want %q (chroot-relative path, no /usr/bin/env)", cmd, "usr/local/sbin/iscsiadm")
++	}
++	if !reflect.DeepEqual(args, []string{"-m", "node"}) {
++		t.Errorf("wrapEnv() args = %v, want [-m node]", args)
++	}
++	// The returned path must contain a slash so that wrapChroot hands chroot a
++	// path (rather than a bare binary name that would need PATH lookup).
++	if !strings.Contains(cmd, "/") {
++		t.Errorf("returned path must be chroot-relative with slashes, got %q", cmd)
++	}
++}
++
++// TestWrapEnv_TalosChroot_WithEnv keeps the upstream behavior when
++// /usr/bin/env IS present in the chroot.
++func TestWrapEnv_TalosChroot_WithEnv(t *testing.T) {
++	tmpDir := t.TempDir()
++
++	envDir := filepath.Join(tmpDir, "usr/bin")
++	if err := os.MkdirAll(envDir, 0755); err != nil {
++		t.Fatalf("MkdirAll: %v", err)
++	}
++	if err := os.WriteFile(filepath.Join(envDir, "env"), []byte("#!/bin/sh\n"), 0755); err != nil {
++		t.Fatalf("WriteFile env: %v", err)
++	}
++
++	iscsiadmDir := filepath.Join(tmpDir, "usr/local/sbin")
++	if err := os.MkdirAll(iscsiadmDir, 0755); err != nil {
++		t.Fatalf("MkdirAll: %v", err)
++	}
++	if err := os.WriteFile(filepath.Join(iscsiadmDir, "iscsiadm"), []byte("#!/bin/sh\n"), 0755); err != nil {
++		t.Fatalf("WriteFile iscsiadm: %v", err)
++	}
++
++	h := &hostexec{chrootDir: tmpDir}
++	cmd, args := h.wrapEnv("iscsiadm", "-m", "node")
++
++	if cmd != "/usr/bin/env" {
++		t.Errorf("wrapEnv() cmd = %q, want /usr/bin/env (upstream behavior when env exists)", cmd)
++	}
++	if len(args) < 3 || args[0] != "-i" || !strings.HasPrefix(args[1], "PATH=") || args[2] != "iscsiadm" {
++		t.Errorf("wrapEnv() args = %v, want [-i PATH=... iscsiadm -m node]", args)
++	}
++	if !reflect.DeepEqual(args, []string{"-i", "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "iscsiadm", "-m", "node"}) {
++		t.Errorf("wrapEnv() args = %v, want full env-style args", args)
++	}
++}
++
++// TestWrap_TalosChroot_NoEnv_FullChain verifies the full wrap() pipeline
++// produces a chroot invocation that does not go through /usr/bin/env.
++func TestWrap_TalosChroot_NoEnv_FullChain(t *testing.T) {
++	tmpDir := t.TempDir()
++
++	iscsiadmDir := filepath.Join(tmpDir, "usr/local/sbin")
++	if err := os.MkdirAll(iscsiadmDir, 0755); err != nil {
++		t.Fatalf("MkdirAll: %v", err)
++	}
++	if err := os.WriteFile(filepath.Join(iscsiadmDir, "iscsiadm"), []byte("#!/bin/sh\n"), 0755); err != nil {
++		t.Fatalf("WriteFile iscsiadm: %v", err)
++	}
++
++	h := &hostexec{chrootDir: tmpDir}
++	cmd, args := h.wrap("iscsiadm", "-m", "node")
++
++	if cmd != "/usr/sbin/chroot" {
++		t.Fatalf("wrap() cmd = %q, want /usr/sbin/chroot", cmd)
++	}
++	if len(args) < 3 {
++		t.Fatalf("wrap() args too short: %v", args)
++	}
++	if args[0] != tmpDir {
++		t.Errorf("wrap() args[0] = %q, want chrootDir %q", args[0], tmpDir)
++	}
++	if args[1] != "usr/local/sbin/iscsiadm" {
++		t.Errorf("wrap() args[1] = %q, want usr/local/sbin/iscsiadm (no env in chain)", args[1])
++	}
++	if !reflect.DeepEqual(args[2:], []string{"-m", "node"}) {
++		t.Errorf("wrap() trailing args = %v, want [-m node]", args[2:])
++	}
++}

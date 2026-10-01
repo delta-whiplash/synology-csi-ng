@@ -73,6 +73,26 @@ None of this is exotic. Every one of these was reproduced, traced to a specific 
 | Mount / cross-node move | ✅ validated | ⚠️ blocked by upstream bugs (see below) | ⚠️ untested here |
 | Snapshots | ✅ (LUN) | ⚠️ driver-side gaps | — |
 | Resize | ✅ | ✅ | ✅ |
+| `mountPermissions` StorageClass param | — (block device) | ✅ applied to target dir + post-mount chmod (`0750` default, octal, e.g. `"0755"`) | ⚠️ use mount options (`uid`, `gid`, `dir_mode`, `file_mode`) instead |
+
+<details><summary>Example — NFS StorageClass with explicit mount permissions</summary>
+
+```yaml
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: synology-nfs
+provisioner: csi.synology.com
+parameters:
+  protocol: nfs
+  dsm: "10.0.0.1"
+  location: "/volume1"
+  mountPermissions: "0755"   # octal, applied to the pod's target path
+reclaimPolicy: Delete
+mountOptions: ["nolock"]
+```
+
+</details>
 
 ## The Talos story (why we can prove it works)
 
