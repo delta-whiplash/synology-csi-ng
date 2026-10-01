@@ -20,7 +20,7 @@ Legend: ✅ fixed here · 🔧 driver patch (our builds) · 📋 tracked upstrea
 
 | Issue | Summary | Status |
 |---|---|---|
-| [#130](https://github.com/SynologyOpenSource/synology-csi/pull/130) | Talos chroot fix (no `/usr/bin/env` on host) | 🔧 candidate for our builds; chart flags already unblock released images |
+| [#130](https://github.com/SynologyOpenSource/synology-csi/pull/130) | Talos chroot fix (no `/usr/bin/env` on host) | ✅ **patched** (0003: wrapEnv falls back to direct chroot resolution); chart flags already unblock released images |
 | [#103](https://github.com/SynologyOpenSource/synology-csi/issues/103) | `Volume[UUID] is not found` | ❓ reproduced & diagnosed here (stale per-node state); repro doc in TESTING.md |
 | [#111](https://github.com/SynologyOpenSource/synology-csi/issues/111) | Mount failure after upgrading to 1.2.1 | 🔧 related to #89-era changes; covered by our validated builds |
 | [#97](https://github.com/SynologyOpenSource/synology-csi/issues/97) / [#65](https://github.com/SynologyOpenSource/synology-csi/issues/65) | "Couldn't find any host available" | 📋 tracked (node registration diagnostics) |
@@ -36,7 +36,7 @@ Legend: ✅ fixed here · 🔧 driver patch (our builds) · 📋 tracked upstrea
 | [#91](https://github.com/SynologyOpenSource/synology-csi/issues/91) / [#105-adjacent] | Failed to set NFS privilege rule | 🔧 same family as #139 |
 | [#113](https://github.com/SynologyOpenSource/synology-csi/issues/113) | NFS privilege breaks NAT-ed networks | 🔧 PR #142 (configurable allowlist) applies |
 | [#131](https://github.com/SynologyOpenSource/synology-csi/issues/131) | NodeGetVolumeStats / expand for static NFS PVs | 📋 tracked |
-| [#95](https://github.com/SynologyOpenSource/synology-csi/issues/95) | NFS export world-readable | 📋 tracked (mountPermissions plumbing exists in driver) |
+| [#95](https://github.com/SynologyOpenSource/synology-csi/issues/95) | NFS export world-readable | ✅ **patched** (0003: `mountPermissions` StorageClass param fully propagated to NodePublish NFS; SMB documented separately) |
 | **32-char truncation** (undocumented upstream) | DSM truncates share names at 32 chars; driver mounts the full name → every NFS PVC fails to publish | 🔧 **our own finding** — patch designed (consistent truncated naming), PR upstream planned |
 
 ## Security
@@ -54,7 +54,7 @@ Legend: ✅ fixed here · 🔧 driver patch (our builds) · 📋 tracked upstrea
 | Issue | Summary | Status |
 |---|---|---|
 | [#121](https://github.com/SynologyOpenSource/synology-csi/issues/121) / [#92](https://github.com/SynologyOpenSource/synology-csi/issues/92) / [#96](https://github.com/SynologyOpenSource/synology-csi/issues/96) | Share naming / prefix control | 📋 tracked (driver: share name generation) — interacts with the 32-char truncation fix |
-| [#78](https://github.com/SynologyOpenSource/synology-csi/issues/78) / [#104](https://github.com/SynologyOpenSource/synology-csi/pull/104) | Minimum capacity configurable / normalization | 🔧 PR #104 applies |
+| [#78](https://github.com/SynologyOpenSource/synology-csi/issues/78) / [#104](https://github.com/SynologyOpenSource/synology-csi/pull/104) | Minimum capacity configurable / normalization | ✅ **patched** (0003: CreateVolume clamps <1 GiB requests up to DSM minimum instead of rejecting) |
 | [#36](https://github.com/SynologyOpenSource/synology-csi/issues/36) | Prometheus metrics | 📋 tracked |
 | [#93](https://github.com/SynologyOpenSource/synology-csi/issues/93) | Raw block volumes | 📋 tracked |
 | [#99](https://github.com/SynologyOpenSource/synology-csi/issues/99) | RWX behaviour on iSCSI | 📋 tracked (docs + validation) |
@@ -67,7 +67,7 @@ Legend: ✅ fixed here · 🔧 driver patch (our builds) · 📋 tracked upstrea
 | [#138](https://github.com/SynologyOpenSource/synology-csi/issues/138) | Stale iSCSI node records after rapid clone+delete | 🔧 reproduced-class (matches our multi-node diagnostics); needs upstream fix |
 | [#119](https://github.com/SynologyOpenSource/synology-csi/issues/119) / [#84](https://github.com/SynologyOpenSource/synology-csi/issues/84) | Snapshot failures | 📋 tracked |
 | [#52](https://github.com/SynologyOpenSource/synology-csi/issues/52) / [#59](https://github.com/SynologyOpenSource/synology-csi/issues/59) | SMB: already-exists / permission errors | 📋 tracked (SMB untested here) |
-| [#134](https://github.com/SynologyOpenSource/synology-csi/issues/134) | Bad description for digits-only namespaces | 🔧 validation fix candidate |
+| [#134](https://github.com/SynologyOpenSource/synology-csi/issues/134) | Bad description for digits-only namespaces | ✅ **patched** (0003: digits-only PVC namespace prefixed with `ns-` in LUN/namespace descriptions) |
 | [#23](https://github.com/SynologyOpenSource/synology-csi/issues/23) / [#73](https://github.com/SynologyOpenSource/synology-csi/issues/73) / [#37](https://github.com/SynologyOpenSource/synology-csi/issues/37) / [#22](https://github.com/SynologyOpenSource/synology-csi/issues/22) / [#33](https://github.com/SynologyOpenSource/synology-csi/issues/33) / [#90](https://github.com/SynologyOpenSource/synology-csi/issues/90) / [#87](https://github.com/SynologyOpenSource/synology-csi/issues/87) / [#98](https://github.com/SynologyOpenSource/synology-csi/issues/98) / [#120](https://github.com/SynologyOpenSource/synology-csi/issues/120) / [#81](https://github.com/SynologyOpenSource/synology-csi/issues/81) | Assorted iSCSI/SMB/arch questions & bugs | 📋 triaged as they are picked up |
 
 ## Documentation
