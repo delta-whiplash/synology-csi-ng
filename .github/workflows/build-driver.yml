@@ -235,6 +235,13 @@ jobs:
         run: |
           # New GHCR packages default to private; a CSI driver image is
           # useless to cluster nodes if they cannot pull it anonymously.
+          # Check first: a package already public returns 404 on the PATCH
+          # (and used to fail this gate despite being perfectly pullable).
+          sleep 5  # let the registry index the new package
+          VISIBILITY=$(gh api "user/packages/container/synology-csi" --jq .visibility 2>/dev/null || echo unknown)
+          if [ "$VISIBILITY" = "public" ]; then
+            echo "package already public"; exit 0
+          fi
           ok=0
           for i in $(seq 1 10); do
             if gh api --method PATCH \
