@@ -23,18 +23,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Validate upstream_ref (tag poisoning guard)
+      - name: Validate upstream_ref
+        env:
+          UPSTREAM_REF: ${{ inputs.upstream_ref }}
         run: |
-          case "${{ inputs.upstream_ref }}" in
-            v[0-9].[0-9]*.[0-9]*) echo "ref OK: ${{ inputs.upstream_ref }}" ;;
-            *) echo "::error::upstream_ref must match v<major>.<minor>.<patch>"; exit 1 ;;
-          esac
+          if ! echo "$UPSTREAM_REF" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::upstream_ref must match v<major>.<minor>.<patch>"
+            exit 1
+          fi
+          echo "UPSTREAM_REF_VALIDATED=$UPSTREAM_REF" >> "$GITHUB_ENV"
 
-      - name: Checkout upstream source at ${{ inputs.upstream_ref }}
+      - name: Checkout upstream source at ${{ env.UPSTREAM_REF_VALIDATED }}
         uses: actions/checkout@v4
         with:
           repository: SynologyOpenSource/synology-csi
-          ref: ${{ inputs.upstream_ref }}
+          ref: ${{ env.UPSTREAM_REF_VALIDATED }}
           path: upstream
 
       - uses: docker/setup-qemu-action@v3
@@ -54,7 +57,7 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            ghcr.io/${{ github.repository_owner }}/synology-csi:${{ inputs.upstream_ref }}
+            ghcr.io/${{ github.repository_owner }}/synology-csi:${{ env.UPSTREAM_REF_VALIDATED }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: true
