@@ -81,6 +81,10 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+            {{- /* NFS : squash configurable. "" = pas de squash (Xpenology) ;
+                 absent/valeur par défaut = "root" (comportement upstream). */}}
+            - name: CSI_NFS_ROOT_SQUASH
+              value: {{ .Values.hostTools.nfsRootSquash | quote }}
           securityContext:
             # Privileged by CSI node-plugin design: device nodes, filesystem
             # mounts, and chroot into the host root. This is identical to

@@ -50,6 +50,10 @@ hostTools:
   multipathPath: ""
   multipathdPath: ""
   nvmePath: ""
+  # NFS : valeur du root_squash posée sur les règles d'export des partages
+  # créés par le driver. "" = pas de squash (requis sur Xpenology : "root"
+  # provoque un mount "access denied"). Défaut upstream = "root".
+  nfsRootSquash: ""
 
 # -- DSM credentials. Default: bring your own Secret (or SealedSecret for
 # GitOps) holding the `client-info.yml` key; see upstream
