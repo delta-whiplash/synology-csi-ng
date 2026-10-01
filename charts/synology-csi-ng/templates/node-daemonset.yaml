@@ -100,7 +100,7 @@ spec:
             - name: device-dir
               mountPath: /dev
             - name: host-root
-              mountPath: {{ .Values.hostTools.chrootDir }}
+              mountPath: {{ .Values.hostTools.chrootDir | default "/host" }}
               readOnly: true
             - name: kubelet-dir
               mountPath: {{ .Values.node.kubeletPath }}
