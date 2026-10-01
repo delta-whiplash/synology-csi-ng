@@ -81,6 +81,14 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+            {{- /* CSI_NFS_ROOT_SQUASH overrides the driver's NFS export
+               RootSquash field per call (read via os.LookupEnv on each
+               setNFSVolumePrivilege). Upstream default = "root". Our chart
+               default = "" (empty, present-but-empty env) which disables
+               root squashing entirely — operators can set any NFS-valid
+               value ("root", "all", "") via hostTools.nfsRootSquash. */}}
+            - name: CSI_NFS_ROOT_SQUASH
+              value: {{ .Values.hostTools.nfsRootSquash | quote }}
           securityContext:
             # Privileged by CSI node-plugin design: device nodes, filesystem
             # mounts, and chroot into the host root. This is identical to

@@ -50,6 +50,13 @@ hostTools:
   multipathPath: ""
   multipathdPath: ""
   nvmePath: ""
+  # -- NFS RootSquash value propagated to the driver via the
+  # CSI_NFS_ROOT_SQUASH env var. Upstream default is "root" (squash root
+  # creds on NFS clients); set to "" (present-but-empty env) to disable
+  # squashing entirely, or to "all" to squash every uid. The driver reads
+  # the env on every call, so chart value changes flow through on next
+  # pod restart without a rebuild.
+  nfsRootSquash: ""
 
 # -- DSM credentials. Default: bring your own Secret (or SealedSecret for
 # GitOps) holding the `client-info.yml` key; see upstream
