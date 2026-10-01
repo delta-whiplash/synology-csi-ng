@@ -1,0 +1,703 @@
+diff --git a/pkg/driver/initiator.go b/pkg/driver/initiator.go
+index e9e50f6..65669e9 100644
+--- a/pkg/driver/initiator.go
++++ b/pkg/driver/initiator.go
+@@ -63,7 +63,7 @@ func (t *tools) iscsiadm(cmdArgs ...string) utilexec.Cmd {
+ 	return t.executor.Command("iscsiadm", cmdArgs...)
+ }
+ 
+-// parseSession takes the raw stdout from the `iscsiadm -m session` command and encodes it into an iSCSI session type
++// parseSessions takes the raw stdout from the `iscsiadm -m session` command and encodes it into an iSCSI session type
+ func parseSessions(lines string) []iscsiSession {
+ 	entries := strings.Split(strings.TrimSpace(lines), "\n")
+ 	r := strings.NewReplacer("[", "",
+@@ -80,12 +80,23 @@ func parseSessions(lines string) []iscsiSession {
+ 		id64, _ := strconv.ParseInt(id, 10, 32)
+ 		portal := strings.Split(e[2], ",")[0]
+ 
++		// The IQN field may be a non-IQN identifier (eui.*, naa.*) that does
++		// not contain a colon. Tolerate that: only split the name off when a
++		// colon is present, otherwise use the whole field as both Iqn and
++		// Name. The previous code did `strings.Split(e[3], ":")[1]`
++		// unconditionally, which panicked on colon-less identifiers.
++		iqn := e[3]
++		name := iqn
++		if idx := strings.LastIndex(iqn, ":"); idx >= 0 && idx < len(iqn)-1 {
++			name = iqn[idx+1:]
++		}
++
+ 		s := iscsiSession{
+ 			Protocol: protocol,
+ 			Id:       int32(id64),
+ 			Portal:   portal,
+-			Iqn:      e[3],
+-			Name:     strings.Split(e[3], ":")[1],
++			Iqn:      iqn,
++			Name:     name,
+ 		}
+ 		sessions = append(sessions, s)
+ 	}
+diff --git a/pkg/driver/multipath.go b/pkg/driver/multipath.go
+index daf846d..5abc0e3 100644
+--- a/pkg/driver/multipath.go
++++ b/pkg/driver/multipath.go
+@@ -164,9 +164,18 @@ func lsblk(devicePaths []string, strict bool) ([]Device, error) {
+ 	// Parse devices
+ 	lines := strings.Split(strings.Trim(string(out), "\n"), "\n")
+ 	for _, line := range lines {
++		if strings.TrimSpace(line) == "" {
++			continue
++		}
++		// Use Split(" ") (not Fields) so an empty PKNAME for a root device
++		// survives as an empty column — the root filter below relies on it.
++		// The previous guard (`len(columns) < 5`) crashed on columns[5] and
++		// columns[6] access when a line was short. Require the full 7
++		// columns we asked lsblk for; skip any malformed line cleanly.
+ 		columns := strings.Split(line, " ")
+-		if len(columns) < 5 {
+-			return nil, fmt.Errorf("invalid output from lsblk: %s", line)
++		if len(columns) < 7 {
++			log.Debugf("lsblk: skipping malformed line (%d columns): %q", len(columns), line)
++			continue
+ 		}
+ 		device := &Device{
+ 			Name:      columns[0],
+diff --git a/pkg/dsm/service/dsm.go b/pkg/dsm/service/dsm.go
+index 1ac01ee..a74ecb6 100644
+--- a/pkg/dsm/service/dsm.go
++++ b/pkg/dsm/service/dsm.go
+@@ -7,14 +7,16 @@ package service
+ import (
+ 	"errors"
+ 	"fmt"
++	"strconv"
++	"strings"
++	"sync"
++	"time"
+ 
+ 	"github.com/cenkalti/backoff/v4"
+ 	log "github.com/sirupsen/logrus"
+ 	"google.golang.org/grpc/codes"
+ 	"google.golang.org/grpc/status"
+-	"strconv"
+-	"time"
+-	"strings"
++
+ 	"github.com/SynologyOpenSource/synology-csi/pkg/dsm/common"
+ 	"github.com/SynologyOpenSource/synology-csi/pkg/dsm/webapi"
+ 	"github.com/SynologyOpenSource/synology-csi/pkg/models"
+@@ -22,7 +24,10 @@ import (
+ )
+ 
+ type DsmService struct {
+-	dsms map[string]*webapi.DSM
++	// dsmsMu guards the dsms map. Concurrent AddDsm/GetDsm/ListDsmVolumes
++	// without a lock were racing on the map under -race.
++	dsmsMu sync.RWMutex
++	dsms   map[string]*webapi.DSM
+ }
+ 
+ func NewDsmService() *DsmService {
+@@ -33,17 +38,20 @@ func NewDsmService() *DsmService {
+ 
+ func (service *DsmService) AddDsm(client common.ClientInfo) error {
+ 	// TODO: use sn or other identifiers as key
+-	if _, ok := service.dsms[client.Host]; ok {
++	service.dsmsMu.RLock()
++	_, present := service.dsms[client.Host]
++	service.dsmsMu.RUnlock()
++	if present {
+ 		log.Infof("Adding DSM [%s] already present.", client.Host)
+ 		return nil
+ 	}
+ 
+ 	dsm := &webapi.DSM{
+-		Ip:       client.Host,
+-		Port:     client.Port,
+-		Username: client.Username,
+-		Password: client.Password,
+-		Https:    client.Https,
++		Ip:                 client.Host,
++		Port:               client.Port,
++		Username:           client.Username,
++		Password:           client.Password,
++		Https:              client.Https,
+ 		TLSCACert:          client.TLSCACert,
+ 		TLSServerName:      client.TLSServerName,
+ 		InsecureSkipVerify: client.InsecureSkipVerify,
+@@ -56,13 +64,15 @@ func (service *DsmService) AddDsm(client common.ClientInfo) error {
+ 		return fmt.Errorf("Failed to get system info of DSM: [%s]. err: %v", dsm.Ip, err)
+ 	}
+ 
++	service.dsmsMu.Lock()
+ 	service.dsms[dsm.Ip] = dsm
++	service.dsmsMu.Unlock()
+ 	log.Infof("Add DSM [%s] hostname: %s.", dsm.Ip, dsm.Hostname)
+ 	return nil
+ }
+ 
+ func (service *DsmService) RemoveAllDsms() {
+-	for _, dsm := range service.dsms {
++	for _, dsm := range service.snapshotDsms() {
+ 		log.Infof("Going to logout DSM [%s]", dsm.Ip)
+ 
+ 		for i := 0; i < 3; i++ {
+@@ -77,7 +87,9 @@ func (service *DsmService) RemoveAllDsms() {
+ }
+ 
+ func (service *DsmService) GetDsm(ip string) (*webapi.DSM, error) {
++	service.dsmsMu.RLock()
+ 	dsm, ok := service.dsms[ip]
++	service.dsmsMu.RUnlock()
+ 	if !ok {
+ 		return nil, fmt.Errorf("Requested dsm [%s] does not exist", ip)
+ 	}
+@@ -85,13 +97,29 @@ func (service *DsmService) GetDsm(ip string) (*webapi.DSM, error) {
+ }
+ 
+ func (service *DsmService) GetDsmsCount() int {
+-	return len(service.dsms)
++	service.dsmsMu.RLock()
++	n := len(service.dsms)
++	service.dsmsMu.RUnlock()
++	return n
++}
++
++// snapshotDsms returns a snapshot of the current DSM pointers under the
++// read lock. Callers iterate the snapshot without holding the lock so
++// network I/O in the loop body never blocks a concurrent AddDsm/GetDsm.
++func (service *DsmService) snapshotDsms() []*webapi.DSM {
++	service.dsmsMu.RLock()
++	out := make([]*webapi.DSM, 0, len(service.dsms))
++	for _, dsm := range service.dsms {
++		out = append(out, dsm)
++	}
++	service.dsmsMu.RUnlock()
++	return out
+ }
+ 
+ func (service *DsmService) ListDsmVolumes(ip string) ([]webapi.VolInfo, error) {
+ 	var allVolInfos []webapi.VolInfo
+ 
+-	for _, dsm := range service.dsms {
++	for _, dsm := range service.snapshotDsms() {
+ 		if ip != "" && dsm.Ip != ip {
+ 			continue
+ 		}
+@@ -463,9 +491,9 @@ func (service *DsmService) createVolumeByVolume(dsm *webapi.DSM, spec *models.Cr
+ 	}
+ 
+ 	lunCloneSpec := webapi.LunCloneSpec{
+-		Name:            spec.BackendName,
+-		SrcLunUuid:      srcLunInfo.Uuid,
+-		Location:        spec.Location,
++		Name:       spec.BackendName,
++		SrcLunUuid: srcLunInfo.Uuid,
++		Location:   spec.Location,
+ 	}
+ 
+ 	if _, err := dsm.LunClone(lunCloneSpec); err != nil {
+@@ -526,43 +554,43 @@ func DsmShareToK8sVolume(dsmIp string, info webapi.ShareInfo, protocol string) *
+ 	}
+ 
+ 	return &models.K8sVolumeRespSpec{
+-		DsmIp: dsmIp,
+-		VolumeId: info.Uuid,
++		DsmIp:       dsmIp,
++		VolumeId:    info.Uuid,
+ 		SizeInBytes: utils.MBToBytes(info.QuotaValueInMB),
+-		Location: info.VolPath,
+-		Name: info.Name,
+-		Source: source,
+-		Protocol: protocol,
+-		Share: info,
+-		BaseDir: baseDir,
++		Location:    info.VolPath,
++		Name:        info.Name,
++		Source:      source,
++		Protocol:    protocol,
++		Share:       info,
++		BaseDir:     baseDir,
+ 	}
+ }
+ 
+ func DsmLunToK8sVolume(dsmIp string, info webapi.LunInfo, targetInfo webapi.TargetInfo) *models.K8sVolumeRespSpec {
+ 	return &models.K8sVolumeRespSpec{
+-		DsmIp: dsmIp,
+-		VolumeId: info.Uuid,
++		DsmIp:       dsmIp,
++		VolumeId:    info.Uuid,
+ 		SizeInBytes: int64(info.Size),
+-		Location: info.Location,
+-		Name: info.Name,
+-		Source: "",
+-		Protocol: utils.ProtocolIscsi,
+-		Lun: info,
+-		Target: targetInfo,
++		Location:    info.Location,
++		Name:        info.Name,
++		Source:      "",
++		Protocol:    utils.ProtocolIscsi,
++		Lun:         info,
++		Target:      targetInfo,
+ 	}
+ }
+ 
+ func DsmNamespaceToK8sVolume(dsmIp string, info webapi.NamespaceInfo, subsystemInfo webapi.SubsystemInfo) *models.K8sVolumeRespSpec {
+ 	return &models.K8sVolumeRespSpec{
+-		DsmIp: dsmIp,
+-		VolumeId: info.Uuid,
++		DsmIp:       dsmIp,
++		VolumeId:    info.Uuid,
+ 		SizeInBytes: int64(info.Size),
+-		Location: info.Location,
+-		Name: info.Name,
+-		Source: "",
+-		Protocol: utils.ProtocolNvme,
+-		Namespace: info,
+-		Subsystem: subsystemInfo,
++		Location:    info.Location,
++		Name:        info.Name,
++		Source:      "",
++		Protocol:    utils.ProtocolNvme,
++		Namespace:   info,
++		Subsystem:   subsystemInfo,
+ 	}
+ }
+ 
+@@ -604,7 +632,6 @@ func isNfsVersionSupport(dsm *webapi.DSM, nfsVersion string) bool {
+ 	return true
+ }
+ 
+-
+ func (service *DsmService) CreateVolume(spec *models.CreateK8sVolumeSpec) (*models.K8sVolumeRespSpec, error) {
+ 	if spec.SourceVolumeId != "" {
+ 		/* Create volume by exists volume (Clone) */
+@@ -675,7 +702,7 @@ func (service *DsmService) CreateVolume(spec *models.CreateK8sVolumeSpec) (*mode
+ 	}
+ 
+ 	/* Find appropriate dsm to create volume */
+-	for _, dsm := range service.dsms {
++	for _, dsm := range service.snapshotDsms() {
+ 		if spec.DsmIp != "" && spec.DsmIp != dsm.Ip {
+ 			continue
+ 		}
+@@ -739,7 +766,7 @@ func (service *DsmService) DeleteVolume(volId string) error {
+ 
+ 		namespace, subsystem := k8sVolume.Namespace, k8sVolume.Subsystem
+ 		if err := dsm.NamespaceDelete(namespace.Uuid); err != nil {
+-			if  _, err := dsm.NamespaceGet(namespace.Uuid); err != nil && errors.Is(err, utils.NoSuchNamespaceError("")) {
++			if _, err := dsm.NamespaceGet(namespace.Uuid); err != nil && errors.Is(err, utils.NoSuchNamespaceError("")) {
+ 				return nil
+ 			}
+ 			log.Errorf("[%s] Failed to delete Namespace(%s): %v", dsm.Ip, namespace.Uuid, err)
+@@ -747,7 +774,7 @@ func (service *DsmService) DeleteVolume(volId string) error {
+ 		}
+ 
+ 		if err := dsm.SubsystemDelete(subsystem.Uuid); err != nil {
+-			if  _, err := dsm.SubsystemGet(subsystem.Uuid); err != nil && errors.Is(err, utils.FailedToGetSubsystemError("")) {
++			if _, err := dsm.SubsystemGet(subsystem.Uuid); err != nil && errors.Is(err, utils.FailedToGetSubsystemError("")) {
+ 				return nil
+ 			}
+ 			log.Errorf("[%s] Failed to delete Subsystem(%s): %v", dsm.Ip, subsystem.Uuid, err)
+@@ -757,7 +784,7 @@ func (service *DsmService) DeleteVolume(volId string) error {
+ 		lun, target := k8sVolume.Lun, k8sVolume.Target
+ 
+ 		if err := dsm.LunDelete(lun.Uuid); err != nil {
+-			if  _, err := dsm.LunGet(lun.Uuid); err != nil && errors.Is(err, utils.NoSuchLunError("")) {
++			if _, err := dsm.LunGet(lun.Uuid); err != nil && errors.Is(err, utils.NoSuchLunError("")) {
+ 				return nil
+ 			}
+ 			log.Errorf("[%s] Failed to delete LUN(%s): %v", dsm.Ip, lun.Uuid, err)
+@@ -770,7 +797,7 @@ func (service *DsmService) DeleteVolume(volId string) error {
+ 		}
+ 
+ 		if err := dsm.TargetDelete(strconv.Itoa(target.TargetId)); err != nil {
+-			if  _, err := dsm.TargetGet(strconv.Itoa(target.TargetId)); err != nil {
++			if _, err := dsm.TargetGet(strconv.Itoa(target.TargetId)); err != nil {
+ 				return nil
+ 			}
+ 			log.Errorf("[%s] Failed to delete target(%d): %v", dsm.Ip, target.TargetId, err)
+@@ -785,7 +812,7 @@ func (service *DsmService) DeleteVolume(volId string) error {
+ // the list is incomplete: some volume may exist without appearing here, so the
+ // caller must not read an absence from it as proof that a volume is gone.
+ func (service *DsmService) listISCSIVolumes(dsmIp string) (infos []*models.K8sVolumeRespSpec, listErr error) {
+-	for _, dsm := range service.dsms {
++	for _, dsm := range service.snapshotDsms() {
+ 		if dsmIp != "" && dsmIp != dsm.Ip {
+ 			continue
+ 		}
+@@ -947,7 +974,7 @@ func (service *DsmService) ExpandVolume(volId string, newSize int64) (*models.K8
+ 		}
+ 
+ 		spec := webapi.NamespaceSetSpec{
+-			Uuid: volId,
++			Uuid:    volId,
+ 			NewSize: uint64(newSize),
+ 		}
+ 		if err := dsm.NamespaceSet(spec); err != nil {
+@@ -956,7 +983,7 @@ func (service *DsmService) ExpandVolume(volId string, newSize int64) (*models.K8
+ 		k8sVolume.SizeInBytes = newSize
+ 	} else {
+ 		spec := webapi.LunUpdateSpec{
+-			Uuid: volId,
++			Uuid:    volId,
+ 			NewSize: uint64(newSize),
+ 		}
+ 		if err := dsm.LunUpdate(spec); err != nil {
+@@ -987,17 +1014,17 @@ func (service *DsmService) CreateSnapshot(spec *models.CreateK8sVolumeSnapshotSp
+ 
+ 	if k8sVolume.Protocol == utils.ProtocolIscsi {
+ 		snapshotSpec := webapi.SnapshotCreateSpec{
+-			Name:    spec.SnapshotName,
+-			SrcUuid: srcVolId,
++			Name:        spec.SnapshotName,
++			SrcUuid:     srcVolId,
+ 			Description: spec.Description,
+-			TakenBy: spec.TakenBy,
+-			IsLocked: spec.IsLocked,
++			TakenBy:     spec.TakenBy,
++			IsLocked:    spec.IsLocked,
+ 		}
+ 
+ 		snapshotUuid, err := dsm.SnapshotCreate(snapshotSpec)
+ 		if err != nil {
+ 			if err == utils.OutOfFreeSpaceError("") || err == utils.SnapshotReachMaxCountError("") {
+-				return nil,status.Errorf(codes.ResourceExhausted, fmt.Sprintf("Failed to SnapshotCreate(%s), err: %v", srcVolId, err))
++				return nil, status.Errorf(codes.ResourceExhausted, fmt.Sprintf("Failed to SnapshotCreate(%s), err: %v", srcVolId, err))
+ 			}
+ 			return nil, status.Errorf(codes.Internal, fmt.Sprintf("Failed to SnapshotCreate(%s), err: %v", srcVolId, err))
+ 		}
+@@ -1033,16 +1060,16 @@ func (service *DsmService) CreateSnapshot(spec *models.CreateK8sVolumeSnapshotSp
+ 		}
+ 
+ 		snapshotSpec := webapi.SnapshotCreateSpec{
+-			Name:    spec.SnapshotName,
+-			SrcUuid: srcVolId,
++			Name:        spec.SnapshotName,
++			SrcUuid:     srcVolId,
+ 			Description: spec.Description,
+-			TakenBy: spec.TakenBy,
+-			IsLocked: spec.IsLocked,
++			TakenBy:     spec.TakenBy,
++			IsLocked:    spec.IsLocked,
+ 		}
+ 		snapshotUuid, err := dsm.NamespaceSnapshotCreate(snapshotSpec)
+ 		if err != nil {
+ 			if err == utils.OutOfFreeSpaceError("") || err == utils.SnapshotReachMaxCountError("") {
+-				return nil,status.Errorf(codes.ResourceExhausted, fmt.Sprintf("Failed to NamespaceSnapshotCreate(%s), err: %v", srcVolId, err))
++				return nil, status.Errorf(codes.ResourceExhausted, fmt.Sprintf("Failed to NamespaceSnapshotCreate(%s), err: %v", srcVolId, err))
+ 			}
+ 			return nil, status.Errorf(codes.Internal, fmt.Sprintf("Failed to NamespaceSnapshotCreate(%s), err: %v", srcVolId, err))
+ 		}
+@@ -1137,7 +1164,7 @@ func (service *DsmService) listISCSISnapshotsByDsm(dsm *webapi.DSM) (infos []*mo
+ func (service *DsmService) ListAllSnapshots() []*models.K8sSnapshotRespSpec {
+ 	var allInfos []*models.K8sSnapshotRespSpec
+ 
+-	for _, dsm := range service.dsms {
++	for _, dsm := range service.snapshotDsms() {
+ 		allInfos = append(allInfos, service.listISCSISnapshotsByDsm(dsm)...)
+ 		allInfos = append(allInfos, service.listSMBorNFSSnapshotsByDsm(dsm)...)
+ 		allInfos = append(allInfos, service.listNVMeSnapshotsByDsm(dsm)...)
+@@ -1198,38 +1225,38 @@ func (service *DsmService) ListSnapshots(volId string) []*models.K8sSnapshotResp
+ 
+ func DsmShareSnapshotToK8sSnapshot(dsmIp string, info webapi.ShareSnapshotInfo, shareInfo webapi.ShareInfo, protocol string) *models.K8sSnapshotRespSpec {
+ 	return &models.K8sSnapshotRespSpec{
+-		DsmIp: dsmIp,
+-		Name: strings.ReplaceAll(info.Desc, models.ShareSnapshotDescPrefix, ""), // snapshot-XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX
+-		Uuid: info.Uuid,
+-		ParentName: shareInfo.Name,
+-		ParentUuid: shareInfo.Uuid,
+-		Status: "Healthy", // share snapshot always Healthy
++		DsmIp:       dsmIp,
++		Name:        strings.ReplaceAll(info.Desc, models.ShareSnapshotDescPrefix, ""), // snapshot-XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX
++		Uuid:        info.Uuid,
++		ParentName:  shareInfo.Name,
++		ParentUuid:  shareInfo.Uuid,
++		Status:      "Healthy",                                 // share snapshot always Healthy
+ 		SizeInBytes: utils.MBToBytes(shareInfo.QuotaValueInMB), // unable to get snapshot quota, return parent quota instead
+-		CreateTime: GMTToUnixSecond(info.Time),
+-		Time: info.Time,
+-		RootPath: shareInfo.VolPath,
+-		Protocol: protocol,
++		CreateTime:  GMTToUnixSecond(info.Time),
++		Time:        info.Time,
++		RootPath:    shareInfo.VolPath,
++		Protocol:    protocol,
+ 	}
+ }
+ 
+ func DsmSanSnapshotToK8sSnapshot(dsmIp string, info webapi.SnapshotInfo, protocol string) *models.K8sSnapshotRespSpec {
+ 	return &models.K8sSnapshotRespSpec{
+-		DsmIp: dsmIp,
+-		Name: info.Name,
+-		Uuid: info.Uuid,
+-		ParentName: "", // it can be empty for iscsi/nvme
+-		ParentUuid: info.ParentUuid,
+-		Status: info.Status,
++		DsmIp:       dsmIp,
++		Name:        info.Name,
++		Uuid:        info.Uuid,
++		ParentName:  "", // it can be empty for iscsi/nvme
++		ParentUuid:  info.ParentUuid,
++		Status:      info.Status,
+ 		SizeInBytes: info.TotalSize,
+-		CreateTime: info.CreateTime,
+-		Time: "",
+-		RootPath: info.RootPath,
+-		Protocol: protocol,
++		CreateTime:  info.CreateTime,
++		Time:        "",
++		RootPath:    info.RootPath,
++		Protocol:    protocol,
+ 	}
+ }
+ 
+ func (service *DsmService) getISCSISnapshot(snapshotUuid string) *models.K8sSnapshotRespSpec {
+-	for _, dsm := range service.dsms {
++	for _, dsm := range service.snapshotDsms() {
+ 		snapshots := service.listISCSISnapshotsByDsm(dsm)
+ 		for _, snap := range snapshots {
+ 			if snap.Uuid == snapshotUuid {
+diff --git a/pkg/dsm/webapi/dsmwebapi.go b/pkg/dsm/webapi/dsmwebapi.go
+index a9d7b86..b29b2fa 100644
+--- a/pkg/dsm/webapi/dsmwebapi.go
++++ b/pkg/dsm/webapi/dsmwebapi.go
+@@ -13,23 +13,36 @@ import (
+ 	"net/http"
+ 	"net/url"
+ 	"regexp"
++	"strings"
++	"sync"
++	"time"
+ 
+ 	"github.com/SynologyOpenSource/synology-csi/pkg/logger"
+ 	log "github.com/sirupsen/logrus"
+ )
+ 
++// dsmHTTPTimeout is the per-request timeout applied to every DSM HTTP call.
++// It is a var (not a const) so tests can override it. The default of 30s
++// prevents a hanging DSM from blocking a gRPC handler indefinitely.
++var dsmHTTPTimeout = 30 * time.Second
++
+ type DSM struct {
+-	Ip         string
+-	Port       int
+-	Username   string
+-	Password   string
+-	Sid        string
+-	Https      bool
+-	Controller string
++	Ip                 string
++	Port               int
++	Username           string
++	Password           string
++	Sid                string
++	Https              bool
++	Controller         string
+ 	TLSCACert          string
+ 	TLSServerName      string
+ 	InsecureSkipVerify bool
+ 	SystemInfo
++
++	// sidMu guards Sid. Login writes it, every handler reads it to build the
++	// session cookie. Without a mutex concurrent logins and concurrent
++	// request/send races were observed under -race.
++	sidMu sync.RWMutex
+ }
+ 
+ type SystemInfo struct {
+@@ -56,7 +69,7 @@ type Response struct {
+ 
+ func (dsm *DSM) newHTTPClient() (*http.Client, error) {
+ 	if !dsm.Https {
+-		return &http.Client{}, nil
++		return &http.Client{Timeout: dsmHTTPTimeout}, nil
+ 	}
+ 
+ 	tlsCfg := &tls.Config{}
+@@ -87,7 +100,7 @@ func (dsm *DSM) newHTTPClient() (*http.Client, error) {
+ 	tr := http.DefaultTransport.(*http.Transport).Clone()
+ 	tr.TLSClientConfig = tlsCfg
+ 
+-	return &http.Client{Transport: tr}, nil
++	return &http.Client{Transport: tr, Timeout: dsmHTTPTimeout}, nil
+ }
+ 
+ func (dsm *DSM) sendRequest(data string, apiTemplate interface{}, params url.Values, cgiPath string) (Response, error) {
+@@ -128,7 +141,7 @@ func (dsm *DSM) sendRequestWithoutConnectionCheck(data string, apiTemplate inter
+ 	baseUrl.RawQuery = params.Encode()
+ 
+ 	if logger.WebapiDebug {
+-		log.Debugln(baseUrl.RawQuery)
++		log.Debugln(redactSecrets(baseUrl.RawQuery))
+ 	}
+ 
+ 	if data != "" {
+@@ -137,8 +150,11 @@ func (dsm *DSM) sendRequestWithoutConnectionCheck(data string, apiTemplate inter
+ 		req, err = http.NewRequest("GET", baseUrl.String(), nil)
+ 	}
+ 
+-	if dsm.Sid != "" {
+-		cookie := http.Cookie{Name: "id", Value: dsm.Sid}
++	dsm.sidMu.RLock()
++	sid := dsm.Sid
++	dsm.sidMu.RUnlock()
++	if sid != "" {
++		cookie := http.Cookie{Name: "id", Value: sid}
+ 		req.AddCookie(&cookie)
+ 	}
+ 
+@@ -206,31 +222,102 @@ func (dsm *DSM) sendRequestWithoutConnectionCheck(data string, apiTemplate inter
+ 	return outResp, nil
+ }
+ 
+-// Login by given user name and password
++// redactSecrets replaces passwd=...& and passwd=...$ occurrences in a query
++// string / URL body with [REDACTED]. Defense in depth: after C2 the password
++// no longer appears in the URL at all, but any future caller that adds a
++// sensitive parameter must not accidentally log it either.
++func redactSecrets(s string) string {
++	// Match passwd= up to the next & or end-of-string.
++	re := regexp.MustCompile(`passwd=[^&\s]*`)
++	return re.ReplaceAllString(s, "passwd=[REDACTED]")
++}
++
++// sid returns a snapshot of the current session id under the read lock.
++func (dsm *DSM) sid() string {
++	dsm.sidMu.RLock()
++	s := dsm.Sid
++	dsm.sidMu.RUnlock()
++	return s
++}
++
++// setSid writes the session id under the write lock.
++func (dsm *DSM) setSid(s string) {
++	dsm.sidMu.Lock()
++	dsm.Sid = s
++	dsm.sidMu.Unlock()
++}
++
++// Login by given user name and password.
++//
++// Sends the credentials as an application/x-www-form-urlencoded POST body —
++// never in the URL — so the password does not leak through access logs,
++// browser history, or the debug output of sendRequestWithoutConnectionCheck.
++// Concurrent logins are serialized via sidMu (write-held for the duration).
+ func (dsm *DSM) Login() error {
+-	params := url.Values{}
+-	params.Add("api", "SYNO.API.Auth")
+-	params.Add("method", "login")
+-	params.Add("version", "3")
+-	params.Add("account", dsm.Username)
+-	params.Add("passwd", dsm.Password)
+-	params.Add("format", "sid")
++	dsm.sidMu.Lock()
++	defer dsm.sidMu.Unlock()
++
++	form := url.Values{}
++	form.Add("api", "SYNO.API.Auth")
++	form.Add("method", "login")
++	form.Add("version", "3")
++	form.Add("account", dsm.Username)
++	form.Add("passwd", dsm.Password)
++	form.Add("format", "sid")
++	body := strings.NewReader(form.Encode())
+ 
+-	type LoginResp struct {
+-		Sid string `json:"sid"`
++	var cgiUrl string
++	if dsm.Https {
++		cgiUrl = fmt.Sprintf("https://%s:%d/webapi/auth.cgi", dsm.Ip, dsm.Port)
++	} else {
++		cgiUrl = fmt.Sprintf("http://%s:%d/webapi/auth.cgi", dsm.Ip, dsm.Port)
++	}
++
++	client, err := dsm.newHTTPClient()
++	if err != nil {
++		return err
++	}
++
++	req, err := http.NewRequest("POST", cgiUrl, body)
++	if err != nil {
++		return err
++	}
++	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
++
++	resp, err := client.Do(req)
++	if err != nil {
++		return fmt.Errorf("login to DSM [%s] failed: %v", dsm.Ip, err)
+ 	}
++	defer resp.Body.Close()
+ 
+-	resp, err := dsm.sendRequestWithoutConnectionCheck("", &LoginResp{}, params, "webapi/auth.cgi")
++	respBody, err := ioutil.ReadAll(resp.Body)
+ 	if err != nil {
+-		r, _ := regexp.Compile("passwd=.*&")
+-		temp := r.ReplaceAllString(err.Error(), "")
++		return err
++	}
+ 
+-		return fmt.Errorf("%s", temp)
++	if resp.StatusCode != 200 && resp.StatusCode != 302 {
++		return fmt.Errorf("Bad response status code: %d", resp.StatusCode)
+ 	}
+ 
+-	loginResp, ok := resp.Data.(*LoginResp)
+-	if !ok {
+-		return fmt.Errorf("Failed to assert response to %T", &LoginResp{})
++	type LoginResp struct {
++		Sid string `json:"sid"`
++	}
++	type envelop struct {
++		dsmApiResp
++		Data json.RawMessage `json:"data"`
++	}
++	e := envelop{}
++	if err := json.Unmarshal(respBody, &e); err != nil {
++		return err
++	}
++	if !e.Success {
++		return fmt.Errorf("DSM Api error. Error code:%d", e.Err.Code)
++	}
++	loginResp := &LoginResp{}
++	if e.Data != nil {
++		if err := json.Unmarshal(e.Data, loginResp); err != nil {
++			return err
++		}
+ 	}
+ 	dsm.Sid = loginResp.Sid
+ 
+@@ -248,7 +335,7 @@ func (dsm *DSM) Logout() error {
+ 	if err != nil {
+ 		return err
+ 	}
+-	dsm.Sid = ""
++	dsm.setSid("")
+ 
+ 	return nil
+ }
+diff --git a/pkg/dsm/webapi/dsmwebapi_tls_test.go b/pkg/dsm/webapi/dsmwebapi_tls_test.go
+index 2771377..bbb7a2b 100644
+--- a/pkg/dsm/webapi/dsmwebapi_tls_test.go
++++ b/pkg/dsm/webapi/dsmwebapi_tls_test.go
+@@ -139,11 +139,17 @@ func TestHTTPS_DefaultRejectsUntrustedCert(t *testing.T) {
+ // TestHTTPS_InsecureSkipVerify_ConnectsAndSendsCredentials verifies that
+ // insecureSkipVerify: true still allows connecting to an untrusted endpoint
+ // (explicit opt-in) and that credentials are delivered to the server.
++//
++// Login sends the credentials as an application/x-www-form-urlencoded POST
++// body (C2 fix), so the server reads them from the body rather than the URL
++// query string.
+ func TestHTTPS_InsecureSkipVerify_ConnectsAndSendsCredentials(t *testing.T) {
+ 	var gotAccount, gotPasswd string
+ 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+-		gotAccount = r.URL.Query().Get("account")
+-		gotPasswd = r.URL.Query().Get("passwd")
++		if err := r.ParseForm(); err == nil {
++			gotAccount = r.FormValue("account")
++			gotPasswd = r.FormValue("passwd")
++		}
+ 		fakeDSMHandler(w, r)
+ 	}))
+ 	defer server.Close()
