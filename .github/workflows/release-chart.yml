@@ -16,7 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: azure/setup-helm@bf6a7d304bc2fdb57e0331155b7ebf2c504acf0a # v4
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
         with:
           version: v3.14.4
 
@@ -62,7 +62,13 @@ jobs:
           # real problem (data loss in waiting) and must surface as a
           # workflow failure, not a silent fresh index. The || true path
           # is only acceptable on a first-ever release (no prior tags).
-          prior_tags=$(git tag -l 'chart-v*' | grep -v "^chart-v${TAG}$" || true)
+          #
+          # Use `git ls-remote` against origin rather than `git tag -l`:
+          # actions/checkout without `fetch-depth: 0` does not fetch tags,
+          # so a local tag list would always be empty and silently mask a
+          # broken index.yaml fetch. ls-remote is unconditional — it does
+          # not depend on the local checkout depth.
+          prior_tags=$(git ls-remote --tags origin 'refs/tags/chart-v*' | grep -v "chart-v${TAG}\b" || true)
           if [ -n "$prior_tags" ]; then
             curl -fsSL https://delta-whiplash.github.io/synology-csi-ng/index.yaml -o /tmp/chart-repo/index.yaml
           else

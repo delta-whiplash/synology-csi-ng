@@ -11,7 +11,7 @@ name: Build driver image
 # Pipeline:
 #   1. build-test  — build amd64 locally (--load), smoke-test the resulting
 #                    binary and the host tooling embedded in the image
-#                    (iscsiadm, mkfs.xfs, nvme-cli), AND run `go test -race`
+#                    (mkfs.xfs, nvme-cli), AND run `go test -race`
 #                    against the patched source. Gate: anything red blocks
 #                    the publish job.
 #   2. publish     — multi-arch build+push, cosign keyless signature,
@@ -36,6 +36,8 @@ permissions:
 jobs:
   build-test:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -109,24 +111,22 @@ jobs:
 
       - name: Smoke test — host tools embedded in runtime image
         run: |
-          # The runtime image must ship iscsiadm, mkfs.xfs and nvme-cli —
-          # the CSI node DaemonSet relies on all three at runtime.
+          # The runtime image must ship mkfs.xfs and nvme-cli — the CSI node
+          # DaemonSet relies on both at runtime. iscsiadm is intentionally
+          # NOT in the image: on Talos the host provides it, bind-mounted
+          # into the node container via hostTools.iscsiadmPath.
           docker run --rm --entrypoint /bin/sh synology-csi:smoke-test -c '
             set -eu
-            echo "--- iscsiadm ---"
-            if command -v iscsiadm >/dev/null 2>&1; then
-              iscsiadm --version || true
-            elif [ -x /usr/local/sbin/iscsiadm ]; then
-              echo "/usr/local/sbin/iscsiadm present"
-              /usr/local/sbin/iscsiadm --version || true
-            else
-              echo "::error::iscsiadm not found in runtime image"
-              exit 1
-            fi
             echo "--- mkfs.xfs ---"
             mkfs.xfs -V
             echo "--- nvme ---"
             nvme version || true
+            echo "--- iscsiadm (INFO) ---"
+            if command -v iscsiadm >/dev/null 2>&1 || [ -x /usr/local/sbin/iscsiadm ]; then
+              echo "INFO: iscsiadm present in image"
+            else
+              echo "INFO: iscsiadm not in image — provided by host on Talos"
+            fi
           '
 
       - name: go test -race on patched source (gate)
