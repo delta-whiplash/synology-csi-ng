@@ -27,6 +27,16 @@ jobs:
       - name: helm lint
         run: helm lint charts/synology-csi-ng --strict
 
+      - name: helm template (default profile)
+        run: |
+          # Default profile: empty iscsiadmPath, chrootDir=/host (kubeadm-style).
+          helm template test charts/synology-csi-ng \
+            --set storageClasses.iscsi-delete.reclaimPolicy=Delete \
+            --set storageClasses.iscsi-delete.parameters.fsType=xfs \
+            --set storageClasses.iscsi-delete.parameters.location=/volume2 \
+            > /tmp/render-default.yaml
+          test -s /tmp/render-default.yaml
+
       - name: helm template (Talos profile)
         run: |
           helm template test charts/synology-csi-ng \
@@ -34,13 +44,20 @@ jobs:
             --set storageClasses.iscsi-delete.reclaimPolicy=Delete \
             --set storageClasses.iscsi-delete.parameters.fsType=xfs \
             --set storageClasses.iscsi-delete.parameters.location=/volume2 \
-            > /tmp/render.yaml
-          test -s /tmp/render.yaml
+            > /tmp/render-talos.yaml
+          test -s /tmp/render-talos.yaml
 
       - name: kubeconform
         run: |
           curl -sSfL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz | tar xz kubeconform
-          ./kubeconform -strict -ignore-missing-schemas -summary /tmp/render.yaml
+          # Snapshot.storage.k8s.io CRDs are not in kubeconform's default
+          # schema bundle — pull them from the datreeio CRDs-catalog which
+          # tracks upstream CRD OpenAPI specs.
+          SCHEMA_LOC="-schema-location default -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'"
+          eval ./kubeconform -strict -ignore-missing-schemas -summary \
+            $SCHEMA_LOC /tmp/render-default.yaml
+          eval ./kubeconform -strict -ignore-missing-schemas -summary \
+            $SCHEMA_LOC /tmp/render-talos.yaml
 
   docs:
     runs-on: ubuntu-latest
