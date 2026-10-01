@@ -137,7 +137,10 @@ If you arrived here by searching one of them: yes, this chart fixes it.
 ## Documentation
 
 - [docs/TESTING.md](docs/TESTING.md) — the functional validation protocol (the one used to certify every release here)
-- [docs/BACKLOG.md](docs/BACKLOG.md) — the full upstream issue triage
+- [docs/DISASTER-RECOVERY.md](docs/DISASTER-RECOVERY.md) — backup and restore of Synology CSI PVCs (iSCSI LUN snapshots via VolumeSnapshot + Velero, NFS/SMB rsync, recovery order, known pitfalls)
+- [docs/OPERATIONS.md](docs/OPERATIONS.md) — operational runbook: driver upgrade (order + gates), node plugin restart (symptom "Volume not found"), stale iSCSI session purge (tested `iscsiadm -m node --logout` procedure via privileged pod), NFS diagnostics (`nolock`, `vers`, squash), controller sizing
+- [docs/CODE-REVIEW-v1.4.0.md](docs/CODE-REVIEW-v1.4.0.md) — security/perf/stability sweep on upstream v1.4.0 (every finding cites `file:line`)
+- [docs/BACKLOG.md](docs/BACKLOG.md) — the full upstream issue triage, including how to contribute patches upstream (1 issue = 1 branch = 1 PR, transferrable patches)
 - [SECURITY.md](SECURITY.md) — security posture and reporting
 - [CONTRIBUTING.md](CONTRIBUTING.md) — how to contribute
 
