@@ -73,6 +73,26 @@ None of this is exotic. Every one of these was reproduced, traced to a specific 
 | Mount / cross-node move | ✅ validated | ⚠️ blocked by upstream bugs (see below) | ⚠️ untested here |
 | Snapshots | ✅ (LUN) | ⚠️ driver-side gaps | — |
 | Resize | ✅ | ✅ | ✅ |
+| iSCSI CHAP auth (`chapUser`/`chapPassword` via StorageClass secret) | ⏳ **deferred** — groundwork in patch 0004 (`TargetSetAuth` webapi), full feature requires `ControllerPublish/UnpublishVolume` wiring + capability (tracked, not shipped) | — | — |
+| `minVolumeSize` StorageClass param (override the 1 GiB floor) | ✅ (#78, patch 0004) — CreateVolume only; expansion paths use no floor (0 = no clamp), so an expand request is honored as-is. Shrinks remain blocked DSM-side. | ✅ | ✅ |
+
+<details><summary>Example — StorageClass with custom minVolumeSize</summary>
+
+```yaml
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: synology-iscsi
+provisioner: csi.san.synology.com
+parameters:
+  protocol: iscsi
+  dsm: "10.0.0.1"
+  location: "/volume1"
+  minVolumeSize: "500Mi"   # optional; default 1GiB. Accepts Ki/Mi/Gi/Ti suffixes or plain bytes.
+reclaimPolicy: Delete
+```
+
+</details>
 | `mountPermissions` StorageClass param | — (block device) | ✅ applied to target dir + post-mount chmod (`0750` default, octal, e.g. `"0755"`) | ⚠️ use mount options (`uid`, `gid`, `dir_mode`, `file_mode`) instead |
 
 <details><summary>Example — NFS StorageClass with explicit mount permissions</summary>
