@@ -37,6 +37,173 @@ index e9e50f6..65669e9 100644
  		}
  		sessions = append(sessions, s)
  	}
+diff --git a/pkg/driver/malformed_test.go b/pkg/driver/malformed_test.go
+new file mode 100644
+index 0000000..8cba880
+--- /dev/null
++++ b/pkg/driver/malformed_test.go
+@@ -0,0 +1,161 @@
++// Copyright 2026 Synology Inc.
++
++package driver
++
++import (
++	"os"
++	"os/exec"
++	"path/filepath"
++	"strings"
++	"testing"
++)
++
++// TestC4_ParseSessionsMalformedIQN verifies that parseSessions does not
++// panic when an iSCSI session entry has no colon in the IQN (e.g. an
++// eui.* or naa.* identifier), and skips that entry cleanly.
++//
++// With the current code (initiator.go:88 does strings.Split(e[3], ":")[1]
++// without checking the slice length), this test panics and crashes the test
++// binary.
++func TestC4_ParseSessionsMalformedIQN(t *testing.T) {
++	// Real-shaped iSCSI session line where the "IQN" is a non-IQN identifier
++	// with no colon. Under the current code, this line triggers
++	// strings.Split(e[3], ":")[1] -> index out of range -> panic.
++	raw := "tcp: [1] 10.10.16.11:3260,1 eui.0123456789ABCDEF\n" +
++		"tcp: [2] 10.10.16.12:3260,1 iqn.2000-01.com.synology:target-1\n"
++
++	var got []iscsiSession
++	var panicked interface{}
++	func() {
++		defer func() { panicked = recover() }()
++		got = parseSessions(raw)
++	}()
++	if panicked != nil {
++		t.Fatalf("parseSessions panicked on IQN without colon: %v", panicked)
++	}
++
++	// The second line must still be parsed correctly.
++	if len(got) < 1 {
++		t.Fatalf("expected at least one parsed session, got %d", len(got))
++	}
++	var foundIQN bool
++	for _, s := range got {
++		if s.Iqn == "iqn.2000-01.com.synology:target-1" {
++			foundIQN = true
++			if s.Name != "target-1" {
++				t.Errorf("well-formed IQN Name = %q, want %q", s.Name, "target-1")
++			}
++		}
++	}
++	if !foundIQN {
++		t.Errorf("well-formed IQN was dropped from the output: %+v", got)
++	}
++}
++
++// TestC4_ParseSessionsTotallyGarbled verifies that parseSessions tolerates
++// completely garbled lines (missing fields, wrong shape) without panicking,
++// AND exercises the real edge case the `len(e) < 4` guard was added for:
++// an IQN field that is a single trailing colon (e.g. "target:") which would
++// yield an empty Name if split unconditionally. The parser must skip the
++// trailing-colon case gracefully rather than producing a session with Name="".
++func TestC4_ParseSessionsTotallyGarbled(t *testing.T) {
++	raw := "garbage-with-no-fields\n" +
++		"tcp: [1] only-one-field\n" +
++		"\n" +
++		"::::\n" +
++		// IQN-shaped field with a single trailing colon. Under the original
++		// `strings.Split(e[3], ":")[1]` code this produced Name="" silently.
++		// With the fix it must be parsed into a session whose Name is the
++		// full field (no split), because there is no target suffix after ':'.
++		"tcp: [3] 10.10.16.11:3260,1 target:\n"
++
++	var panicked interface{}
++	var got []iscsiSession
++	func() {
++		defer func() { panicked = recover() }()
++		got = parseSessions(raw)
++	}()
++	if panicked != nil {
++		t.Fatalf("parseSessions panicked on garbled input: %v", panicked)
++	}
++
++	// The trailing-colon IQN must be kept (not dropped), and its Name must
++	// equal the whole field (no empty-string split).
++	var found bool
++	for _, s := range got {
++		if s.Iqn == "target:" {
++			found = true
++			if s.Name != "target:" {
++				t.Errorf("trailing-colon IQN Name = %q, want %q (full field, no empty split)", s.Name, "target:")
++			}
++		}
++	}
++	if !found {
++		t.Errorf("trailing-colon IQN was dropped from the output: %+v", got)
++	}
++}
++
++// TestC4_LsblkMalformedColumns verifies that the lsblk parser does not panic
++// when a line has fewer than 7 columns and skips the malformed line instead
++// of crashing.
++//
++// With the current code (multipath.go:167-176 guards on < 5 columns but
++// accesses columns[5] and columns[6] unconditionally, and uses
++// strings.Split(line, " ") rather than strings.Fields), this test panics.
++func TestC4_LsblkMalformedColumns(t *testing.T) {
++	// Build a fake `lsblk` that prints a well-formed root device, a short
++	// malformed line, and another well-formed child device. The hierarchy is
++	// sda (root) -> sdb (child), with a garbled line in the middle.
++	tmp := t.TempDir()
++	fakeLsblk := filepath.Join(tmp, "lsblk")
++	// Use single-space separators so strings.Split keeps every column. A
++	// root device's empty PKNAME becomes an empty column at index 2 (two
++	// adjacent spaces in the output), which the production parser relies on
++	// to filter roots. The garbled line has 4 tokens separated by spaces
++	// and must be skipped by the `len(columns) < 7` guard.
++	script := "#!/bin/sh\n" +
++		"printf 'sda sda  4:0:0:0 disk iscsi 1G\\n'\n" +
++		"printf 'short line only four\\n'\n" +
++		"printf 'sdb sdb sda 5:0:0:0 disk iscsi 2G\\n'\n"
++	if err := os.WriteFile(fakeLsblk, []byte(script), 0755); err != nil {
++		t.Fatalf("write fake lsblk: %v", err)
++	}
++
++	// Prepend the fake binary to PATH so utilexec finds it first.
++	prevPath := os.Getenv("PATH")
++	os.Setenv("PATH", tmp+":"+prevPath)
++	defer os.Setenv("PATH", prevPath)
++
++	// Sanity-check: the fake is what exec.LookPath returns.
++	if got, err := exec.LookPath("lsblk"); err != nil || got != fakeLsblk {
++		t.Fatalf("fake lsblk not on PATH: got %q err %v", got, err)
++	}
++
++	var panicked interface{}
++	var devices []Device
++	var parseErr error
++	func() {
++		defer func() { panicked = recover() }()
++		devices, parseErr = lsblk([]string{"sda", "sdb"}, false)
++	}()
++	if panicked != nil {
++		t.Fatalf("lsblk parser panicked on a 4-column line: %v", panicked)
++	}
++	if parseErr != nil {
++		t.Fatalf("lsblk returned error instead of skipping the malformed line and continuing: %v", parseErr)
++	}
++
++	// After the fix: malformed lines should be skipped, the 2 well-formed
++	// lines should parse into one root device (sda) with one child (sdb).
++	if len(devices) != 1 {
++		t.Errorf("parsed root device count = %d, want 1", len(devices))
++	}
++	if len(devices) == 1 && len(devices[0].Children) != 1 {
++		t.Errorf("root device children count = %d, want 1", len(devices[0].Children))
++	}
++	for _, d := range devices {
++		if strings.TrimSpace(d.Transport) == "" || strings.TrimSpace(d.Size) == "" {
++			t.Errorf("device %+v has empty Transport or Size — parser read past the end of a short line", d)
++		}
++	}
++}
 diff --git a/pkg/driver/multipath.go b/pkg/driver/multipath.go
 index daf846d..5abc0e3 100644
 --- a/pkg/driver/multipath.go
@@ -459,8 +626,312 @@ index 1ac01ee..a74ecb6 100644
  		snapshots := service.listISCSISnapshotsByDsm(dsm)
  		for _, snap := range snapshots {
  			if snap.Uuid == snapshotUuid {
+diff --git a/pkg/dsm/service/dsm_race_test.go b/pkg/dsm/service/dsm_race_test.go
+new file mode 100644
+index 0000000..eca9a7a
+--- /dev/null
++++ b/pkg/dsm/service/dsm_race_test.go
+@@ -0,0 +1,254 @@
++// Copyright 2026 Synology Inc.
++
++package service
++
++import (
++	"fmt"
++	"net"
++	"net/http"
++	"net/http/httptest"
++	"runtime"
++	"strconv"
++	"sync"
++	"sync/atomic"
++	"testing"
++
++	"github.com/SynologyOpenSource/synology-csi/pkg/dsm/common"
++	"github.com/SynologyOpenSource/synology-csi/pkg/dsm/webapi"
++)
++
++// fakeDSMForService stands up an httptest server that satisfies the sequence
++// of calls AddDsm performs (Login + 3x FillSystemInfo) and returns 200/JSON
++// for anything else.
++func fakeDSMForService(t *testing.T) *httptest.Server {
++	t.Helper()
++	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		// Small delay to increase the window where readers are making HTTP
++		// calls while writers are adding DSMs to the map.
++		// time.Sleep(10 * time.Microsecond)
++		w.Header().Set("Content-Type", "application/json")
++		switch r.URL.Path {
++		case "/webapi/auth.cgi":
++			fmt.Fprint(w, `{"success":true,"data":{"sid":"test-sid"}}`)
++		case "/webapi/entry.cgi":
++			// FillSystemInfo hits this endpoint three times with type=define,
++			// type=network, and no type. Answer every shape permissively.
++			fmt.Fprint(w, `{"success":true,"data":{"model":"fake","firmware_ver":"7.0","serial":"X","hostname":"fake","support_nvmeof":"no","ip":"127.0.0.1","mask":"255.255.255.0","speed":1000,"status":"ready","type":"lan","use_dhcp":true}}`)
++		default:
++			fmt.Fprint(w, `{"success":true,"data":{}}`)
++		}
++	})
++	srv := httptest.NewServer(handler)
++	t.Cleanup(srv.Close)
++	return srv
++}
++
++// TestC1_DeterministicMapRace_PROOF is a throwaway test that proves the race
++// detector CAN catch the bug. It directly iterates service.dsms WITHOUT
++// holding dsmsMu.RLock (simulating the buggy version) against a concurrent
++// writer. This test MUST fail under `go test -race`. After verifying the
++// failure, this test should be deleted or commented out — it's not a real
++// test, just proof that the race detector works.
++//
++// TO RUN THE PROOF: uncomment the body below, run `go test -race -run TestC1_DeterministicMapRace_PROOF`,
++// observe the race detection, then re-comment it.
++func TestC1_DeterministicMapRace_PROOF(t *testing.T) {
++	t.Skip("PROOF TEST: this test simulates the BUGGY version (unlocked iteration) to verify the race detector works. It MUST fail when uncommented. After verifying, re-comment it.")
++	/*
++		svc := NewDsmService()
++		const N = 32
++		iterations := 10000
++
++		var writerWg sync.WaitGroup
++		writerWg.Add(N)
++		for i := 0; i < N; i++ {
++			i := i
++			go func() {
++				defer writerWg.Done()
++				for j := 0; j < iterations; j++ {
++					key := fmt.Sprintf("writer-%d-iter-%d", i, j)
++					svc.dsmsMu.Lock()
++					svc.dsms[key] = &webapi.DSM{Ip: key}
++					svc.dsmsMu.Unlock()
++				}
++			}()
++		}
++
++		var readerWg sync.WaitGroup
++		readerWg.Add(N)
++		for i := 0; i < N; i++ {
++			go func() {
++				defer readerWg.Done()
++				for j := 0; j < iterations; j++ {
++					// BUGGY VERSION: iterate WITHOUT lock
++					for _, dsm := range svc.dsms {
++						_ = dsm
++					}
++				}
++			}()
++		}
++
++		writerWg.Wait()
++		readerWg.Wait()
++	*/
++}
++
++// TestC1_DeterministicMapRace is the deterministic race detector for C1.
++// It directly accesses service.dsms without any HTTP calls, so the race
++// window is not masked by network I/O. Readers iterate the map in a tight
++// loop (no lock in the buggy version), writers insert entries in a tight
++// loop. Under `go test -race`, this MUST detect the race when the lock is
++// missing, and MUST pass when the lock is present.
++//
++// This test is INTERNAL (package service, not service_test) so it can
++// access the unexported dsms field directly.
++func TestC1_DeterministicMapRace(t *testing.T) {
++	svc := NewDsmService()
++	const N = 32
++	iterations := 10000
++
++	// Writers: directly insert into service.dsms without going through
++	// AddDsm (which does HTTP calls). This exercises the raw map write.
++	var writerWg sync.WaitGroup
++	writerWg.Add(N)
++	for i := 0; i < N; i++ {
++		i := i
++		go func() {
++			defer writerWg.Done()
++			for j := 0; j < iterations; j++ {
++				key := fmt.Sprintf("writer-%d-iter-%d", i, j)
++				// Simulate the write pattern from AddDsm: take the lock,
++				// write, release. In the buggy version (no lock in readers),
++				// this write races with the unlocked iteration below.
++				svc.dsmsMu.Lock()
++				svc.dsms[key] = &webapi.DSM{Ip: key}
++				svc.dsmsMu.Unlock()
++			}
++		}()
++	}
++
++	// Readers: directly iterate service.dsms in a tight loop. In the buggy
++	// version (no snapshotDsms), this iterates WITHOUT holding dsmsMu.RLock,
++	// which races with the writer's locked write above. The race detector
++	// flags ANY concurrent map read/write, even if one side holds a lock —
++	// because the unlocked side is not synchronized.
++	var readerWg sync.WaitGroup
++	readerWg.Add(N)
++	for i := 0; i < N; i++ {
++		go func() {
++			defer readerWg.Done()
++			for j := 0; j < iterations; j++ {
++				// In the FIXED version, this should call snapshotDsms()
++				// (which takes RLock). In the BUGGY version, it iterates
++				// service.dsms directly without any lock.
++				_ = svc.snapshotDsms()
++			}
++		}()
++	}
++
++	writerWg.Wait()
++	readerWg.Wait()
++}
++
++// TestC1_ConcurrentDsmServiceMapRace verifies that concurrent AddDsm/GetDsm
++// on the same DsmService do not race on the dsms map, exercising the REAL
++// list paths (listSMBorNFSVolumes, listNVMeVolumes, findSMBorNFSVolume,
++// getSMBorNFSSnapshot). This test validates that the conversions to
++// snapshotDsms() don't break the real code paths, but it does NOT reliably
++// detect the race (the HTTP calls in the list methods mask the race window).
++// For deterministic race detection, see TestC1_DeterministicMapRace above.
++func TestC1_ConcurrentDsmServiceMapRace(t *testing.T) {
++	srv := fakeDSMForService(t)
++	_, portStr, err := net.SplitHostPort(srv.Listener.Addr().String())
++	if err != nil {
++		t.Fatalf("SplitHostPort: %v", err)
++	}
++	basePort, _ := strconv.Atoi(portStr)
++
++	svc := NewDsmService()
++	const N = 16
++
++	// Pre-populate the map with a few DSMs so readers have something to
++	// iterate. This increases the chance of overlapping with the writers'
++	// map assignments.
++	for i := 0; i < 4; i++ {
++		ci := common.ClientInfo{
++			Host:     fmt.Sprintf("pre-host-%d", i),
++			Port:     basePort,
++			Https:    false,
++			Username: "admin",
++			Password: "secret",
++		}
++		_ = svc.AddDsm(ci)
++	}
++
++	// Writers complete when every AddDsm has returned. Readers must run
++	// until that happens, so the race window is fully covered.
++	writersDone := make(chan struct{})
++
++	var wg sync.WaitGroup
++	var readsCompleted int64
++
++	// Concurrent writers: AddDsm on distinct keys so the map write at
++	// service/dsm.go:59 is hit every iteration (the "already present"
++	// short-circuit would otherwise mask the race).
++	wg.Add(N)
++	for i := 0; i < N; i++ {
++		i := i
++		go func() {
++			defer wg.Done()
++			for j := 0; j < 5; j++ {
++				ci := common.ClientInfo{
++					Host:     fmt.Sprintf("host-%d-%d", i, j),
++					Port:     basePort,
++					Https:    false,
++					Username: "admin",
++					Password: "secret",
++				}
++				_ = svc.AddDsm(ci)
++			}
++		}()
++	}
++
++	// Close writersDone when all AddDsm have returned.
++	go func() {
++		wg.Wait()
++		close(writersDone)
++	}()
++
++	// Concurrent readers: hammer the 4 list paths that iterate service.dsms
++	// (findSMBorNFSVolume, listSMBorNFSVolumes, listNVMeVolumes,
++	// getSMBorNFSSnapshot). Each reader loops until writersDone closes, so
++	// every reader is guaranteed to be running while at least one AddDsm
++	// is mid-flight. Under -race, a missing lock on service.dsms is
++	// reported on the very first overlap.
++	const readers = N * 2
++	var readerWg sync.WaitGroup
++	readerWg.Add(readers)
++	for i := 0; i < readers; i++ {
++		go func() {
++			defer readerWg.Done()
++			for {
++				select {
++				case <-writersDone:
++					return
++				default:
++				}
++				// Exercise each of the 4 previously-unlocked sites.
++				_, _ = svc.listSMBorNFSVolumes("")
++				_, _ = svc.listNVMeVolumes("")
++				_, _ = svc.findSMBorNFSVolume(func(_ webapi.ShareInfo) bool { return false })
++				_ = svc.getSMBorNFSSnapshot("nonexistent-uuid")
++				atomic.AddInt64(&readsCompleted, 1)
++				// Force a context switch every 100 iterations to increase
++				// the chance of overlapping with the writer's map assignment.
++				if atomic.LoadInt64(&readsCompleted)%100 == 0 {
++					runtime.Gosched()
++				}
++			}
++		}()
++	}
++
++	readerWg.Wait()
++	t.Logf("completed %d reader iterations across %d goroutines", atomic.LoadInt64(&readsCompleted), readers)
++}
+diff --git a/pkg/dsm/service/namespace_volume.go b/pkg/dsm/service/namespace_volume.go
+index 20911cf..49b2c39 100644
+--- a/pkg/dsm/service/namespace_volume.go
++++ b/pkg/dsm/service/namespace_volume.go
+@@ -288,7 +288,7 @@ func (service *DsmService) createNVMeVolumeByDsm(dsm *webapi.DSM, spec *models.C
+ // means the list is incomplete, so absence from it does not prove a volume is
+ // gone.
+ func (service *DsmService) listNVMeVolumes(dsmIp string) (infos []*models.K8sVolumeRespSpec, listErr error) {
+-	for _, dsm := range service.dsms {
++	for _, dsm := range service.snapshotDsms() {
+ 		if dsmIp != "" && dsmIp != dsm.Ip {
+ 			continue
+ 		}
+diff --git a/pkg/dsm/service/share_volume.go b/pkg/dsm/service/share_volume.go
+index 5b2b00b..5f0d179 100644
+--- a/pkg/dsm/service/share_volume.go
++++ b/pkg/dsm/service/share_volume.go
+@@ -268,7 +268,7 @@ func (service *DsmService) shareToVolume(dsm *webapi.DSM, share webapi.ShareInfo
+ // share. It reports (nil, nil) when no share matched and every DSM could be
+ // listed, so the caller may then conclude the volume is not a share at all.
+ func (service *DsmService) findSMBorNFSVolume(pred func(webapi.ShareInfo) bool) (volume *models.K8sVolumeRespSpec, listErr error) {
+-	for _, dsm := range service.dsms {
++	for _, dsm := range service.snapshotDsms() {
+ 		if dsm.IsUC() {
+ 			continue
+ 		}
+@@ -303,7 +303,7 @@ func (service *DsmService) findSMBorNFSVolume(pred func(webapi.ShareInfo) bool)
+ // share that could not be classified as one that no longer exists is what makes
+ // DeleteVolume report success without deleting anything.
+ func (service *DsmService) listSMBorNFSVolumes(dsmIp string) (infos []*models.K8sVolumeRespSpec, listErr error) {
+-	for _, dsm := range service.dsms {
++	for _, dsm := range service.snapshotDsms() {
+ 		if dsmIp != "" && dsmIp != dsm.Ip {
+ 			continue
+ 		}
+@@ -357,7 +357,7 @@ func (service *DsmService) listSMBorNFSSnapshotsByDsm(dsm *webapi.DSM) (infos []
+ }
+ 
+ func (service *DsmService) getSMBorNFSSnapshot(snapshotUuid string) *models.K8sSnapshotRespSpec {
+-	for _, dsm := range service.dsms {
++	for _, dsm := range service.snapshotDsms() {
+ 		snapshots := service.listSMBorNFSSnapshotsByDsm(dsm)
+ 		for _, snap := range snapshots {
+ 			if snap.Uuid == snapshotUuid {
 diff --git a/pkg/dsm/webapi/dsmwebapi.go b/pkg/dsm/webapi/dsmwebapi.go
-index a9d7b86..b29b2fa 100644
+index a9d7b86..73fa9a9 100644
 --- a/pkg/dsm/webapi/dsmwebapi.go
 +++ b/pkg/dsm/webapi/dsmwebapi.go
 @@ -13,23 +13,36 @@ import (
@@ -548,7 +1019,7 @@ index a9d7b86..b29b2fa 100644
  		req.AddCookie(&cookie)
  	}
  
-@@ -206,31 +222,102 @@ func (dsm *DSM) sendRequestWithoutConnectionCheck(data string, apiTemplate inter
+@@ -206,31 +222,107 @@ func (dsm *DSM) sendRequestWithoutConnectionCheck(data string, apiTemplate inter
  	return outResp, nil
  }
  
@@ -561,14 +1032,6 @@ index a9d7b86..b29b2fa 100644
 +	// Match passwd= up to the next & or end-of-string.
 +	re := regexp.MustCompile(`passwd=[^&\s]*`)
 +	return re.ReplaceAllString(s, "passwd=[REDACTED]")
-+}
-+
-+// sid returns a snapshot of the current session id under the read lock.
-+func (dsm *DSM) sid() string {
-+	dsm.sidMu.RLock()
-+	s := dsm.Sid
-+	dsm.sidMu.RUnlock()
-+	return s
 +}
 +
 +// setSid writes the session id under the write lock.
@@ -584,6 +1047,13 @@ index a9d7b86..b29b2fa 100644
 +// never in the URL — so the password does not leak through access logs,
 +// browser history, or the debug output of sendRequestWithoutConnectionCheck.
 +// Concurrent logins are serialized via sidMu (write-held for the duration).
++// Note: sidMu is held across the full HTTP round-trip (up to dsmHTTPTimeout,
++// typically 30s) — this is intentional, as releasing it mid-flight would let
++// a concurrent Login or cookie-read observe a half-updated session state.
++// Any DSM call that goes through sendRequestWithoutConnectionCheck will
++// block on sidMu.RLock() until Login returns, which is the correct
++// serialization for "no API call may use the session before the handshake
++// has completed".
  func (dsm *DSM) Login() error {
 -	params := url.Values{}
 -	params.Add("api", "SYNO.API.Auth")
@@ -611,27 +1081,10 @@ index a9d7b86..b29b2fa 100644
 +		cgiUrl = fmt.Sprintf("https://%s:%d/webapi/auth.cgi", dsm.Ip, dsm.Port)
 +	} else {
 +		cgiUrl = fmt.Sprintf("http://%s:%d/webapi/auth.cgi", dsm.Ip, dsm.Port)
-+	}
-+
-+	client, err := dsm.newHTTPClient()
-+	if err != nil {
-+		return err
-+	}
-+
-+	req, err := http.NewRequest("POST", cgiUrl, body)
-+	if err != nil {
-+		return err
-+	}
-+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-+
-+	resp, err := client.Do(req)
-+	if err != nil {
-+		return fmt.Errorf("login to DSM [%s] failed: %v", dsm.Ip, err)
  	}
-+	defer resp.Body.Close()
  
 -	resp, err := dsm.sendRequestWithoutConnectionCheck("", &LoginResp{}, params, "webapi/auth.cgi")
-+	respBody, err := ioutil.ReadAll(resp.Body)
++	client, err := dsm.newHTTPClient()
  	if err != nil {
 -		r, _ := regexp.Compile("passwd=.*&")
 -		temp := r.ReplaceAllString(err.Error(), "")
@@ -639,13 +1092,30 @@ index a9d7b86..b29b2fa 100644
 +	}
  
 -		return fmt.Errorf("%s", temp)
-+	if resp.StatusCode != 200 && resp.StatusCode != 302 {
-+		return fmt.Errorf("Bad response status code: %d", resp.StatusCode)
++	req, err := http.NewRequest("POST", cgiUrl, body)
++	if err != nil {
++		return err
  	}
++	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
++
++	resp, err := client.Do(req)
++	if err != nil {
++		return fmt.Errorf("login to DSM [%s] failed: %v", dsm.Ip, err)
++	}
++	defer resp.Body.Close()
  
 -	loginResp, ok := resp.Data.(*LoginResp)
 -	if !ok {
 -		return fmt.Errorf("Failed to assert response to %T", &LoginResp{})
++	respBody, err := ioutil.ReadAll(resp.Body)
++	if err != nil {
++		return err
++	}
++
++	if resp.StatusCode != 200 && resp.StatusCode != 302 {
++		return fmt.Errorf("Bad response status code: %d", resp.StatusCode)
++	}
++
 +	type LoginResp struct {
 +		Sid string `json:"sid"`
 +	}
@@ -665,10 +1135,16 @@ index a9d7b86..b29b2fa 100644
 +		if err := json.Unmarshal(e.Data, loginResp); err != nil {
 +			return err
 +		}
++	}
++	if loginResp.Sid == "" {
++		// DSM answered success:true but with no data (or data without a sid).
++		// Treating that as a successful login would silently publish Sid=""
++		// and leave every subsequent API call unauthenticated.
++		return fmt.Errorf("DSM login succeeded but returned no session id")
  	}
  	dsm.Sid = loginResp.Sid
  
-@@ -248,7 +335,7 @@ func (dsm *DSM) Logout() error {
+@@ -248,7 +340,7 @@ func (dsm *DSM) Logout() error {
  	if err != nil {
  		return err
  	}
@@ -677,6 +1153,201 @@ index a9d7b86..b29b2fa 100644
  
  	return nil
  }
+diff --git a/pkg/dsm/webapi/dsmwebapi_race_test.go b/pkg/dsm/webapi/dsmwebapi_race_test.go
+new file mode 100644
+index 0000000..4165dc5
+--- /dev/null
++++ b/pkg/dsm/webapi/dsmwebapi_race_test.go
+@@ -0,0 +1,189 @@
++// Copyright 2026 Synology Inc.
++
++package webapi
++
++import (
++	"bytes"
++	"fmt"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"sync"
++	"sync/atomic"
++	"testing"
++
++	"github.com/SynologyOpenSource/synology-csi/pkg/logger"
++	log "github.com/sirupsen/logrus"
++)
++
++// TestC1_ConcurrentLoginSidRace verifies that concurrent logins on the same
++// DSM do not trigger a data race on DSM.Sid. The fake server returns a
++// different sid per call, so concurrent writers + concurrent readers on the
++// cookie path exercise both sides of the race.
++//
++// Must be run under `go test -race`. With the current code (no mutex on Sid),
++// the race detector reports a data race on DSM.Sid.
++func TestC1_ConcurrentLoginSidRace(t *testing.T) {
++	var calls int64
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		n := atomic.AddInt64(&calls, 1)
++		w.Header().Set("Content-Type", "application/json")
++		fmt.Fprintf(w, `{"success":true,"data":{"sid":"sid-%d"}}`, n)
++	}))
++	defer server.Close()
++
++	host, port := serverHostPort(t, server)
++	dsm := &DSM{
++		Ip:       host,
++		Port:     port,
++		Username: "admin",
++		Password: "secret",
++		Https:    false,
++	}
++
++	const N = 32
++	var wg sync.WaitGroup
++	wg.Add(N * 2)
++
++	// Writers: N goroutines calling Login concurrently.
++	for i := 0; i < N; i++ {
++		go func() {
++			defer wg.Done()
++			for j := 0; j < 20; j++ {
++				_ = dsm.Login()
++			}
++		}()
++	}
++
++	// Readers: N goroutines hammering the cookie path by issuing API calls
++	// that reach the Sid read at dsmwebapi.go:140-143.
++	for i := 0; i < N; i++ {
++		go func() {
++			defer wg.Done()
++			for j := 0; j < 20; j++ {
++				// sendRequestWithoutConnectionCheck reads dsm.Sid to build
++				// the cookie. Any endpoint that is not Login will do; we
++				// use VolumeList which hits entry.cgi.
++				_, _ = dsm.VolumeList()
++			}
++		}()
++	}
++
++	wg.Wait()
++}
++
++// TestC2_PasswordInPOSTBodyNotURL verifies that Login uses POST and
++// delivers the password in the request body (form encoded), never in the URL.
++//
++// With the current code (GET + query string at dsmwebapi.go:211-217), this
++// test fails because r.Method == "GET" and the passwd is in the URL.
++func TestC2_PasswordInPOSTBodyNotURL(t *testing.T) {
++	var gotMethod string
++	var gotURL string
++	var gotBody string
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		gotMethod = r.Method
++		gotURL = r.URL.String()
++		buf := new(bytes.Buffer)
++		_, _ = buf.ReadFrom(r.Body)
++		gotBody = buf.String()
++		w.Header().Set("Content-Type", "application/json")
++		fmt.Fprint(w, `{"success":true,"data":{"sid":"test-sid"}}`)
++	}))
++	defer server.Close()
++
++	host, port := serverHostPort(t, server)
++	dsm := &DSM{
++		Ip:       host,
++		Port:     port,
++		Username: "admin",
++		Password: "super-secret-pw",
++		Https:    false,
++	}
++
++	if err := dsm.Login(); err != nil {
++		t.Fatalf("Login: %v", err)
++	}
++
++	if gotMethod != "POST" {
++		t.Errorf("Login HTTP method = %s, want POST (password must not travel in the URL)", gotMethod)
++	}
++	if strings.Contains(gotURL, "super-secret-pw") {
++		t.Errorf("URL leaks password: %s", gotURL)
++	}
++	if !strings.Contains(gotBody, "super-secret-pw") {
++		t.Errorf("password not found in request body: %q", gotBody)
++	}
++}
++
++// TestC2_DebugLogDoesNotLeakPassword verifies that enabling WebapiDebug does
++// not cause the DSM password to appear in log output.
++//
++// With the current code (log.Debugln(baseUrl.RawQuery) at dsmwebapi.go:130-132),
++// this test fails because the raw query contains passwd=<password>.
++func TestC2_DebugLogDoesNotLeakPassword(t *testing.T) {
++	var logBuf bytes.Buffer
++	savedOut := log.StandardLogger().Out
++	savedLevel := log.StandardLogger().Level
++	savedDebug := logger.WebapiDebug
++	log.SetOutput(&logBuf)
++	log.SetLevel(log.DebugLevel)
++	logger.WebapiDebug = true
++	defer func() {
++		log.SetOutput(savedOut)
++		log.SetLevel(savedLevel)
++		logger.WebapiDebug = savedDebug
++	}()
++
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		w.Header().Set("Content-Type", "application/json")
++		fmt.Fprint(w, `{"success":true,"data":{"sid":"test-sid"}}`)
++	}))
++	defer server.Close()
++
++	host, port := serverHostPort(t, server)
++	dsm := &DSM{
++		Ip:       host,
++		Port:     port,
++		Username: "admin",
++		Password: "leak-me-not-abc123",
++		Https:    false,
++	}
++
++	if err := dsm.Login(); err != nil {
++		t.Fatalf("Login: %v", err)
++	}
++
++	if strings.Contains(logBuf.String(), "leak-me-not-abc123") {
++		t.Errorf("password leaked into debug log:\n%s", logBuf.String())
++	}
++}
++
++// TestC3_HTTPClientHasTimeout verifies that the http.Client built by both
++// branches of newHTTPClient has a non-zero Timeout, so a hanging DSM cannot
++// block a handler indefinitely.
++//
++// With the current code (dsmwebapi.go:59 and :87-90 build &http.Client{} with
++// no Timeout), this test fails.
++func TestC3_HTTPClientHasTimeout(t *testing.T) {
++	t.Run("plain", func(t *testing.T) {
++		dsm := &DSM{Ip: "127.0.0.1", Port: 5000, Https: false}
++		c, err := dsm.newHTTPClient()
++		if err != nil {
++			t.Fatalf("newHTTPClient: %v", err)
++		}
++		if c.Timeout <= 0 {
++			t.Errorf("plain http.Client.Timeout = %v, want > 0 (DSM call can hang indefinitely)", c.Timeout)
++		}
++	})
++	t.Run("https", func(t *testing.T) {
++		dsm := &DSM{Ip: "127.0.0.1", Port: 5001, Https: true, InsecureSkipVerify: true}
++		c, err := dsm.newHTTPClient()
++		if err != nil {
++			t.Fatalf("newHTTPClient: %v", err)
++		}
++		if c.Timeout <= 0 {
++			t.Errorf("https http.Client.Timeout = %v, want > 0", c.Timeout)
++		}
++	})
++}
 diff --git a/pkg/dsm/webapi/dsmwebapi_tls_test.go b/pkg/dsm/webapi/dsmwebapi_tls_test.go
 index 2771377..bbb7a2b 100644
 --- a/pkg/dsm/webapi/dsmwebapi_tls_test.go
