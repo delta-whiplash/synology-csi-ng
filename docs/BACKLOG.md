@@ -34,22 +34,22 @@ Legend: ✅ fixed here · 🔧 driver patch (our builds) · 📋 tracked upstrea
 
 | Issue | Summary | Status |
 |---|---|---|
-| [#139](https://github.com/SynologyOpenSource/synology-csi/issues/139) | CreateVolume "succeeds" while NFS privilege save failed (DSM 2370) | 💬 **Commented 2026-10-01** with reproduction evidence (driver creates share + export rule, save returns 2370, rules not loaded) + 🔧 **Patched** in `0001-nfs-configurable-root-squash-and-2370-retry.patch` (retry on 2370, cap 5 attempts). Analysis cites `pkg/dsm/webapi/share.go:494-530` (upstream retry loop) and `backoff.Permanent(err)` at line 503 which does not cover the first-save-2370 case |
+| [#139](https://github.com/SynologyOpenSource/synology-csi/issues/139) | CreateVolume "succeeds" while NFS privilege save failed (DSM 2370) | 💬 **Commented 2026-10-01** with reproduction evidence (driver creates share + export rule, save returns 2370, rules not loaded) + 🔧 **Patched** in `0001-nfs-configurable-root-squash-and-2370-retry.patch` (retry on 2370, cap 5 attempts). Analysis cites `pkg/dsm/webapi/share.go:494-530` (upstream retry loop) and `backoff.Permanent(err)` at line 505 which does not cover the first-save-2370 case |
 | [#91](https://github.com/SynologyOpenSource/synology-csi/issues/91) / [#105-adjacent] | Failed to set NFS privilege rule | 🔧 same family as #139 — covered by the 2370 retry in `0001` |
 | [#113](https://github.com/SynologyOpenSource/synology-csi/issues/113) | NFS privilege breaks NAT-ed networks | 🔧 PR #142 (configurable allowlist) applies |
 | [#131](https://github.com/SynologyOpenSource/synology-csi/issues/131) | NodeGetVolumeStats / expand for static NFS PVs | 📋 tracked |
-| [#95](https://github.com/SynologyOpenSource/synology-csi/issues/95) | NFS export world-readable | 💬 **Commented 2026-10-01** with evidence: `mountPermissions` parameter exists (`pkg/driver/nodeserver.go:845`, default 0750), configurable via StorageClass (lines 852-857). 🔧 **Patched** in `0003` (hardened default + per-StorageClass control). `0001` also contributes configurable `RootSquash` via `CSI_NFS_ROOT_SQUASH` env var |
-| **32-char truncation** (undocumented upstream) | DSM truncates share names at 32 chars; driver mounts the full name → every NFS PVC fails to publish | 🔧 **Patched** in `0002-critical-stability-security.patch` (consistent truncated naming) |
+| [#95](https://github.com/SynologyOpenSource/synology-csi/issues/95) | NFS export world-readable | 💬 **Commented 2026-10-01** with evidence: `mountPermissions` parameter exists natively (`pkg/driver/nodeserver.go:845`, default `0750`), configurable per StorageClass (lines 852-857). **No patch needed** — upstream already supports it, documented for operators. `0001` also contributes configurable `RootSquash` via `CSI_NFS_ROOT_SQUASH` env var |
+| **32-char truncation** (undocumented upstream) | DSM truncates share names at 32 chars; driver creates the share truncated (GenShareName already truncates correctly since v1.1.0) but the MOUNT path still uses the full name → every NFS PVC fails to publish | 📋 **Upstream bug, mount-side; NOT fixed in our builds** (diagnosis in `docs/CODE-REVIEW-v1.4.0.md`). The naming side is fine — only the mount call needs the same truncation. Workaround: manually rename the share on DSM to the truncated name |
 
 ## Security
 
 | Issue | Summary | Status |
 |---|---|---|
-| [#47](https://github.com/SynologyOpenSource/synology-csi/issues/47) | Node ClusterRole can read ALL secrets | ✅ réellement corrigé (RBAC node émondé, secrets retirés) — la chart ne laisse au ClusterRole node que nodes [get,list,watch] |
-| [#30](https://github.com/SynologyOpenSource/synology-csi/issues/30) | securityContext support | ✅ tous les conteneurs du chart (driver + provisioner/attacher/resizer/snapshotter/registrar) sont durcis : drop ALL caps, readOnlyRootFilesystem, seccomp RuntimeDefault ; non-root (65534) sur controller/snapshotter, root uniquement là où le hostPath l'impose (node-driver-registrar, node plugin) |
+| [#47](https://github.com/SynologyOpenSource/synology-csi/issues/47) | Node ClusterRole can read ALL secrets | ✅ fixed (node RBAC pruned, secrets removed) — the chart leaves the node ClusterRole with only `nodes [get,list,watch]` |
+| [#30](https://github.com/SynologyOpenSource/synology-csi/issues/30) | securityContext support | ✅ every container in the chart (driver + provisioner/attacher/resizer/snapshotter/registrar) is hardened: drop ALL caps, readOnlyRootFilesystem, seccomp RuntimeDefault; non-root (65534) on controller/snapshotter, root only where hostPath requires it (node-driver-registrar, node plugin) |
 | [#35](https://github.com/SynologyOpenSource/synology-csi/issues/35) | Don't require DSM admin account | 📋 tracked (needs DSM privilege scoping docs + validation) |
-| [#82](https://github.com/SynologyOpenSource/synology-csi/issues/82) / [#63](https://github.com/SynologyOpenSource/synology-csi/issues/63) | iSCSI targets created with no auth / CHAP support | 🔧 **Patched** in `0004` (CHAP via StorageClass secrets, `auth_type` configurable) |
-| [#78](https://github.com/SynologyOpenSource/synology-csi/issues/78) | Related iSCSI auth hardening | 🔧 **Patched** in `0004` |
+| [#82](https://github.com/SynologyOpenSource/synology-csi/issues/82) / [#63](https://github.com/SynologyOpenSource/synology-csi/issues/63) | iSCSI targets created with no auth / CHAP support | 🔧 **in PR (pending) — patch `0004-chap-and-min-capacity.patch` in review** (CHAP via StorageClass secrets, `auth_type` configurable; not merged into any release yet) |
+| [#78](https://github.com/SynologyOpenSource/synology-csi/issues/78) | Make minimum volume capacity configurable | 🔧 **in PR (pending) — patch `0004-chap-and-min-capacity.patch` in review** (exposes the existing 1 GiB clamp of `0003` as a StorageClass-tunable parameter; not merged into any release yet) |
 | [#100](https://github.com/SynologyOpenSource/synology-csi/issues/100) | Security recommendations | 🔧 **Patched** in `0002-critical-stability-security.patch` (password in query string → POST form, debug log redaction, HTTP timeouts, panic recovery on hot paths) |
 
 ## Features
@@ -102,10 +102,10 @@ Each upstream issue gets its own branch and PR. Do not bundle multiple fixes int
 # Start from main (which tracks upstream v1.4.0)
 git checkout -b fix/139-nfs-2370-retry main
 
-# Apply the patch
-git am patches/v1.4.0/0001-nfs-configurable-root-squash-and-2370-retry.patch
+# Apply the patch (plain diff — use `git apply`, not `git am`; patches are not in mbox format)
+git apply patches/v1.4.0/0001-nfs-configurable-root-squash-and-2370-retry.patch
 
-# Commit (if not already committed by git am)
+# Commit
 git commit -m "fix: retry NFS privilege save on DSM error 2370
 
 The ShareNfsPrivilegeSave function retries when rules do not take effect,
@@ -128,7 +128,7 @@ gh pr create --repo SynologyOpenSource/synology-csi \
 
 The patches in `patches/v1.4.0/` are designed to be **transferrable** to upstream:
 
-- They apply cleanly to the upstream v1.4.0 tag (`git am patches/v1.4.0/*.patch`)
+- They apply cleanly to the upstream v1.4.0 tag (`git apply patches/v1.4.0/*.patch`)
 - They do not depend on chart-specific changes
 - They include tests (when applicable)
 - They follow the upstream code style
@@ -147,7 +147,8 @@ To contribute a patch upstream:
 - Configurable root squash (#95, #21)
 - 32-char share name truncation
 - iSCSI session cleanup (#138)
-- CHAP support (#82, #63, #78)
+- CHAP support (#82, #63)
+- Configurable minimum volume capacity (#78)
 - Panic fixes (C4 from `docs/CODE-REVIEW-v1.4.0.md`)
 - Data race fixes (C1)
 - Password leak fixes (C2)
