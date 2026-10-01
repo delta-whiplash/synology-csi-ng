@@ -42,7 +42,7 @@ None of this is exotic. Every one of these was reproduced, traced to a specific 
    YOUR SYNOLOGY / XPEROLOGY NAS (DSM API + iSCSI + NFS)
 ```
 
-1. **A hardened Helm chart** that passes the flags upstream charts forget (`--chroot-dir`, `--iscsiadm-path`), ships current CSI sidecars, non-root controller/snapshotter, least-privilege RBAC, and platform profiles.
+1. **A hardened Helm chart** that passes the flags upstream charts forget (`--chroot-dir`, `--iscsiadm-path`), ships current CSI sidecars, least-privilege RBAC, and platform profiles. **Every container in the chart (driver + provisioner/attacher/resizer/snapshotter sidecars + node-driver-registrar) runs with a locked-down securityContext** — no privilege escalation, all caps dropped, readOnlyRootFilesystem, seccomp RuntimeDefault, non-root where the CSI contract allows it (controller/snapshotter sidecars), root only where the hostPath demands it (node-driver-registrar registration socket, node plugin itself).
 2. **Unmodified image builds** of driver releases Synology published without images — built by CI from the exact upstream tag, published to our GHCR, provenance-tracked.
 3. **A curated fix backlog**: upstream's 63 open issues triaged, the chart-level ones fixed here, the driver-level ones applied as reviewed patches to our builds and pushed upstream as PRs.
 
@@ -104,7 +104,7 @@ storageClasses:
 
 ```sh
 helm install synology-csi oci://ghcr.io/delta-whiplash/charts/synology-csi-ng \
-  --version 0.2.3 -n synology-csi --create-namespace -f values-talos.yaml
+  --version 0.4.0 -n synology-csi --create-namespace -f values-talos.yaml
 ```
 
 Classic HTTPS repo also available: `helm repo add synology-csi-ng https://delta-whiplash.github.io/synology-csi-ng`.

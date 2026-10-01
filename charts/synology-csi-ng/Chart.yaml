@@ -2,7 +2,7 @@ apiVersion: v2
 name: synology-csi-ng
 description: Hardened Helm chart for the official Synology CSI driver — works on Talos Linux, k3s, OpenShift and kubeadm clusters.
 type: application
-version: 0.3.0
+version: 0.4.0
 appVersion: v1.4.0
 home: https://github.com/delta-whiplash/synology-csi-ng
 sources:
