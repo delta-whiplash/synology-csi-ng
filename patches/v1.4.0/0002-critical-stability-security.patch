@@ -628,10 +628,10 @@ index 1ac01ee..a74ecb6 100644
  			if snap.Uuid == snapshotUuid {
 diff --git a/pkg/dsm/service/dsm_race_test.go b/pkg/dsm/service/dsm_race_test.go
 new file mode 100644
-index 0000000..eca9a7a
+index 0000000..1928d41
 --- /dev/null
 +++ b/pkg/dsm/service/dsm_race_test.go
-@@ -0,0 +1,254 @@
+@@ -0,0 +1,204 @@
 +// Copyright 2026 Synology Inc.
 +
 +package service
@@ -675,56 +675,6 @@ index 0000000..eca9a7a
 +	srv := httptest.NewServer(handler)
 +	t.Cleanup(srv.Close)
 +	return srv
-+}
-+
-+// TestC1_DeterministicMapRace_PROOF is a throwaway test that proves the race
-+// detector CAN catch the bug. It directly iterates service.dsms WITHOUT
-+// holding dsmsMu.RLock (simulating the buggy version) against a concurrent
-+// writer. This test MUST fail under `go test -race`. After verifying the
-+// failure, this test should be deleted or commented out — it's not a real
-+// test, just proof that the race detector works.
-+//
-+// TO RUN THE PROOF: uncomment the body below, run `go test -race -run TestC1_DeterministicMapRace_PROOF`,
-+// observe the race detection, then re-comment it.
-+func TestC1_DeterministicMapRace_PROOF(t *testing.T) {
-+	t.Skip("PROOF TEST: this test simulates the BUGGY version (unlocked iteration) to verify the race detector works. It MUST fail when uncommented. After verifying, re-comment it.")
-+	/*
-+		svc := NewDsmService()
-+		const N = 32
-+		iterations := 10000
-+
-+		var writerWg sync.WaitGroup
-+		writerWg.Add(N)
-+		for i := 0; i < N; i++ {
-+			i := i
-+			go func() {
-+				defer writerWg.Done()
-+				for j := 0; j < iterations; j++ {
-+					key := fmt.Sprintf("writer-%d-iter-%d", i, j)
-+					svc.dsmsMu.Lock()
-+					svc.dsms[key] = &webapi.DSM{Ip: key}
-+					svc.dsmsMu.Unlock()
-+				}
-+			}()
-+		}
-+
-+		var readerWg sync.WaitGroup
-+		readerWg.Add(N)
-+		for i := 0; i < N; i++ {
-+			go func() {
-+				defer readerWg.Done()
-+				for j := 0; j < iterations; j++ {
-+					// BUGGY VERSION: iterate WITHOUT lock
-+					for _, dsm := range svc.dsms {
-+						_ = dsm
-+					}
-+				}
-+			}()
-+		}
-+
-+		writerWg.Wait()
-+		readerWg.Wait()
-+	*/
 +}
 +
 +// TestC1_DeterministicMapRace is the deterministic race detector for C1.
