@@ -115,7 +115,8 @@ Upstream's open issues are triaged in [docs/BACKLOG.md](docs/BACKLOG.md): what e
 
 - ✅ fixed here: image publication (#149), CRI-O refs (#128/#129), OCI chart (#112), chart login failures (#105), RBAC secrets overreach (#47), securityContext (#30)
 - 🔧 driver patches applied to our builds: Talos chroot (#130/#89), NFS 2370 retry (#140/#139), NFS allowlist for NAT-ed networks (#113/#142)
-- 📋 tracked upstream: share naming (#121/#92/#96), CHAP (#63/#82), metrics (#36), capacity policy (#104/#78)
+- 🔍 **a full code audit of driver v1.4.0** lives in [docs/CODE-REVIEW-v1.4.0.md](docs/CODE-REVIEW-v1.4.0.md): 4 critical (data races on DSM sessions, DSM passwords in GET query strings + debug logs, no HTTP timeouts, unrecovered panics on multipath/iSCSI parsing), 11 major (dead NVMe session detection, iSCSI targets created without auth — #82/#63 confirmed at code level, SMB passwords unescaped — #59, N+1 API storms on the kubelet stats path), 9 minor — each with file:line and a suggested fix. These findings are the roadmap for our patched builds and the material for upstream PRs.
+- 📋 tracked upstream: share naming (#121/#92/#96), capacity policy (#104/#78), and the rest of the triage in the backlog
 
 ## Documentation
 
