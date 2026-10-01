@@ -73,35 +73,23 @@ None of this is exotic. Every one of these was reproduced, traced to a specific 
 | Mount / cross-node move | ✅ validated | ⚠️ blocked by upstream bugs (see below) | ⚠️ untested here |
 | Snapshots | ✅ (LUN) | ⚠️ driver-side gaps | — |
 | Resize | ✅ | ✅ | ✅ |
-| iSCSI CHAP auth (`chapUser`/`chapPassword` via StorageClass secret) | ✅ (#82, #63, patch 0004) | — | — |
-| `minVolumeSize` StorageClass param (override the 1 GiB floor) | ✅ (#78, patch 0004) | ✅ | ✅ |
+| iSCSI CHAP auth (`chapUser`/`chapPassword` via StorageClass secret) | ⏳ **deferred** — groundwork in patch 0004 (`TargetSetAuth` webapi), full feature requires `ControllerPublish/UnpublishVolume` wiring + capability (tracked, not shipped) | — | — |
+| `minVolumeSize` StorageClass param (override the 1 GiB floor) | ✅ (#78, patch 0004) — CreateVolume only; expansion paths use no floor (0 = no clamp), so an expand request is honored as-is. Shrinks remain blocked DSM-side. | ✅ | ✅ |
 
-<details><summary>Example — iSCSI StorageClass with CHAP + custom minVolumeSize</summary>
+<details><summary>Example — StorageClass with custom minVolumeSize</summary>
 
 ```yaml
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
-  name: synology-iscsi-chap
-provisioner: csi.synology.com
+  name: synology-iscsi
+provisioner: csi.san.synology.com
 parameters:
   protocol: iscsi
   dsm: "10.0.0.1"
   location: "/volume1"
-  minVolumeSize: "500Mi"                       # optional; default 1GiB. Accepts Ki/Mi/Gi/Ti suffixes or plain bytes.
-  csi.storage.k8s.io/node-stage-secret-name: synology-iscsi-chap
-  csi.storage.k8s.io/node-stage-secret-namespace: kube-system
+  minVolumeSize: "500Mi"   # optional; default 1GiB. Accepts Ki/Mi/Gi/Ti suffixes or plain bytes.
 reclaimPolicy: Delete
----
-# The referenced Secret must contain the CHAP credentials the DSM target will require.
-apiVersion: v1
-kind: Secret
-metadata:
-  name: synology-iscsi-chap
-  namespace: kube-system
-stringData:
-  chapUser: my-iscsi-user
-  chapPassword: super-secret-passphrase
 ```
 
 </details>
