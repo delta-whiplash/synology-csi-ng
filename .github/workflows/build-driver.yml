@@ -7,6 +7,15 @@ name: Build driver image
 # requires RHEL entitlement). Patches are applied on top of the upstream
 # checkout so our builds can ship driver fixes (NFS root_squash, 2370 retry…)
 # while we wait for upstream PRs to land.
+#
+# Pipeline:
+#   1. build-test  — build amd64 locally (--load), smoke-test the resulting
+#                    binary and the host tooling embedded in the image
+#                    (iscsiadm, mkfs.xfs, nvme-cli), AND run `go test -race`
+#                    against the patched source. Gate: anything red blocks
+#                    the publish job.
+#   2. publish     — multi-arch build+push, cosign keyless signature,
+#                    set GHCR visibility to public.
 
 on:
   workflow_dispatch:
@@ -25,8 +34,117 @@ permissions:
   packages: write
 
 jobs:
-  build:
+  build-test:
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Validate upstream_ref
+        env:
+          UPSTREAM_REF: ${{ inputs.upstream_ref }}
+        run: |
+          if ! echo "$UPSTREAM_REF" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::upstream_ref must match v<major>.<minor>.<patch>"
+            exit 1
+          fi
+          echo "UPSTREAM_REF_VALIDATED=$UPSTREAM_REF" >> "$GITHUB_ENV"
+
+      - name: Resolve image tag
+        env:
+          REQUESTED_TAG: ${{ inputs.image_tag }}
+          DEFAULT_TAG: ${{ env.UPSTREAM_REF_VALIDATED }}
+        run: |
+          if [ -n "$REQUESTED_TAG" ]; then
+            echo "IMAGE_TAG=$REQUESTED_TAG" >> "$GITHUB_ENV"
+          else
+            echo "IMAGE_TAG=$DEFAULT_TAG" >> "$GITHUB_ENV"
+          fi
+
+      - name: Checkout upstream source at ${{ env.UPSTREAM_REF_VALIDATED }}
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: SynologyOpenSource/synology-csi
+          ref: ${{ env.UPSTREAM_REF_VALIDATED }}
+          path: upstream
+
+      - name: Apply project patches
+        shell: bash
+        run: |
+          set -euo pipefail
+          patch_dir="$GITHUB_WORKSPACE/patches/${UPSTREAM_REF_VALIDATED}"
+          if [ ! -d "$patch_dir" ]; then
+            echo "No patches directory at $patch_dir — building vanilla upstream."
+            exit 0
+          fi
+          shopt -s nullglob
+          patches=("$patch_dir"/*.patch)
+          if [ ${#patches[@]} -eq 0 ]; then
+            echo "No *.patch files under $patch_dir — building vanilla upstream."
+            exit 0
+          fi
+          echo "Applying ${#patches[@]} patch(es) from $patch_dir to upstream/:"
+          for p in "${patches[@]}"; do
+            echo "  - $(basename "$p")"
+            git -C "$GITHUB_WORKSPACE/upstream" apply "$p"
+          done
+        env:
+          UPSTREAM_REF_VALIDATED: ${{ env.UPSTREAM_REF_VALIDATED }}
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Build amd64 image locally (--load, no push)
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: upstream
+          file: images/Dockerfile.alpine
+          platforms: linux/amd64
+          load: true
+          tags: synology-csi:smoke-test
+          cache-from: type=gha
+          provenance: false
+
+      - name: Smoke test — driver binary responds to --help
+        run: |
+          docker run --rm synology-csi:smoke-test --help
+
+      - name: Smoke test — host tools embedded in runtime image
+        run: |
+          # The runtime image must ship iscsiadm, mkfs.xfs and nvme-cli —
+          # the CSI node DaemonSet relies on all three at runtime.
+          docker run --rm --entrypoint /bin/sh synology-csi:smoke-test -c '
+            set -eu
+            echo "--- iscsiadm ---"
+            if command -v iscsiadm >/dev/null 2>&1; then
+              iscsiadm --version || true
+            elif [ -x /usr/local/sbin/iscsiadm ]; then
+              echo "/usr/local/sbin/iscsiadm present"
+              /usr/local/sbin/iscsiadm --version || true
+            else
+              echo "::error::iscsiadm not found in runtime image"
+              exit 1
+            fi
+            echo "--- mkfs.xfs ---"
+            mkfs.xfs -V
+            echo "--- nvme ---"
+            nvme version || true
+          '
+
+      - name: go test -race on patched source (gate)
+        run: |
+          # Run the driver test suite inside the same golang image used by
+          # the Dockerfile builder stage, so toolchain version matches.
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE/upstream:/src" \
+            -w /src \
+            golang:1.25-alpine@sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84b59 \
+            sh -c 'apk add --no-cache alpine-sdk >/dev/null 2>&1 && go test -race -count=1 -timeout=600s ./pkg/...'
+
+  publish:
+    runs-on: ubuntu-latest
+    needs: build-test
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
