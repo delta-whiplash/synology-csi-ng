@@ -8,7 +8,9 @@ metadata:
     app.kubernetes.io/component: controller
 spec:
   serviceName: {{ include "synology-csi-ng.fullname" . }}-controller
-  replicas: {{ .Values.controller.replicaCount }}
+  # Leader election is NOT wired (sidecars run without --leader-election,
+  # RBAC has no leases rule) → single replica, do NOT scale up.
+  replicas: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ include "synology-csi-ng.name" . }}
