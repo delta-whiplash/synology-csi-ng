@@ -1,4 +1,4 @@
-# Upstream issue backlog — triage
+# Upstream issue backlog, triage
 
 The official repository carries 63 open issues (2021→2026). Each one is triaged here:
 what it is, whether **this chart already fixes it**, whether it needs a driver-level
@@ -37,24 +37,24 @@ Legend: ✅ fixed here · 🔧 driver patch (our builds) · 📋 tracked upstrea
 | [#113](https://github.com/SynologyOpenSource/synology-csi/issues/113) | NFS privilege breaks NAT-ed networks | 🔧 PR #142 (configurable allowlist) applies |
 | [#131](https://github.com/SynologyOpenSource/synology-csi/issues/131) | NodeGetVolumeStats / expand for static NFS PVs | 📋 tracked |
 | [#95](https://github.com/SynologyOpenSource/synology-csi/issues/95) | NFS export world-readable | ✅ **patched** (0003: `mountPermissions` StorageClass param fully propagated to NodePublish NFS; SMB documented separately) |
-| **32-char truncation** (undocumented upstream) | DSM truncates share names at 32 chars; driver mounts the full name → every NFS PVC fails to publish | 🔧 **our own finding** — patch designed (consistent truncated naming), PR upstream planned |
+| **32-char truncation** (undocumented upstream) | DSM truncates share names at 32 chars; driver mounts the full name → every NFS PVC fails to publish | 🔧 **our own finding**, patch designed (consistent truncated naming), PR upstream planned |
 
 ## Security
 
 | Issue | Summary | Status |
 |---|---|---|
-| [#47](https://github.com/SynologyOpenSource/synology-csi/issues/47) | Node ClusterRole can read ALL secrets | ✅ fixed (node RBAC pruned, secrets removed) — the chart leaves the node ClusterRole with only `nodes [get,list,watch]` |
+| [#47](https://github.com/SynologyOpenSource/synology-csi/issues/47) | Node ClusterRole can read ALL secrets | ✅ fixed (node RBAC pruned, secrets removed), the chart leaves the node ClusterRole with only `nodes [get,list,watch]` |
 | [#30](https://github.com/SynologyOpenSource/synology-csi/issues/30) | securityContext support | ✅ every container in the chart (driver + provisioner/attacher/resizer/snapshotter/registrar) is hardened: drop ALL caps, readOnlyRootFilesystem, seccomp RuntimeDefault; non-root (65534) on controller/snapshotter, root only where hostPath requires it (node-driver-registrar, node plugin) |
 | [#35](https://github.com/SynologyOpenSource/synology-csi/issues/35) | Don't require DSM admin account | 📋 tracked (needs DSM privilege scoping docs + validation) |
-| [#82](https://github.com/SynologyOpenSource/synology-csi/issues/82) / [#63](https://github.com/SynologyOpenSource/synology-csi/issues/63) | iSCSI targets created with no auth / CHAP support | ⏳ **groundwork in 0004** (`TargetSetAuth` webapi + `service.SetTargetAuth`); full feature deferred (requires `PUBLISH_UNPUBLISH_VOLUME` capability + `ControllerPublishVolume` wiring that actually receives the secret + `ControllerUnpublishVolume` that resets auth on detach). Tracked, not shipped — see TargetSetAuth godoc for the rationale. |
+| [#82](https://github.com/SynologyOpenSource/synology-csi/issues/82) / [#63](https://github.com/SynologyOpenSource/synology-csi/issues/63) | iSCSI targets created with no auth / CHAP support | ⏳ **groundwork in 0004** (`TargetSetAuth` webapi + `service.SetTargetAuth`); full feature deferred (requires `PUBLISH_UNPUBLISH_VOLUME` capability + `ControllerPublishVolume` wiring that actually receives the secret + `ControllerUnpublishVolume` that resets auth on detach). Tracked, not shipped, see TargetSetAuth godoc for the rationale. |
 | [#100](https://github.com/SynologyOpenSource/synology-csi/issues/100) | Security recommendations | 📋 tracked |
 
 ## Features
 
 | Issue | Summary | Status |
 |---|---|---|
-| [#121](https://github.com/SynologyOpenSource/synology-csi/issues/121) / [#92](https://github.com/SynologyOpenSource/synology-csi/issues/92) / [#96](https://github.com/SynologyOpenSource/synology-csi/issues/96) | Share naming / prefix control | 📋 tracked (driver: share name generation) — interacts with the 32-char truncation fix |
-| [#78](https://github.com/SynologyOpenSource/synology-csi/issues/78) / [#104](https://github.com/SynologyOpenSource/synology-csi/pull/104) | Minimum capacity configurable / normalization | ✅ **patched** (0003: CreateVolume clamps <1 GiB requests up to DSM minimum instead of rejecting; 0004: configurable via `minVolumeSize` StorageClass param, accepts Ki/Mi/Gi/Ti suffixes or plain bytes, default 1 GiB, overflow-guarded. **CreateVolume only** — Controller/NodeExpandVolume use floor=0 so an expand is never silently inflated to 1 GiB; shrinks remain blocked DSM-side) |
+| [#121](https://github.com/SynologyOpenSource/synology-csi/issues/121) / [#92](https://github.com/SynologyOpenSource/synology-csi/issues/92) / [#96](https://github.com/SynologyOpenSource/synology-csi/issues/96) | Share naming / prefix control | 📋 tracked (driver: share name generation), interacts with the 32-char truncation fix |
+| [#78](https://github.com/SynologyOpenSource/synology-csi/issues/78) / [#104](https://github.com/SynologyOpenSource/synology-csi/pull/104) | Minimum capacity configurable / normalization | ✅ **patched** (0003: CreateVolume clamps <1 GiB requests up to DSM minimum instead of rejecting; 0004: configurable via `minVolumeSize` StorageClass param, accepts Ki/Mi/Gi/Ti suffixes or plain bytes, default 1 GiB, overflow-guarded. **CreateVolume only**, Controller/NodeExpandVolume use floor=0 so an expand is never silently inflated to 1 GiB; shrinks remain blocked DSM-side) |
 | [#36](https://github.com/SynologyOpenSource/synology-csi/issues/36) | Prometheus metrics | 📋 tracked |
 | [#93](https://github.com/SynologyOpenSource/synology-csi/issues/93) | Raw block volumes | 📋 tracked |
 | [#99](https://github.com/SynologyOpenSource/synology-csi/issues/99) | RWX behaviour on iSCSI | 📋 tracked (docs + validation) |

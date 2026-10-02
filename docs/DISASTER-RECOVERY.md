@@ -1,8 +1,8 @@
-# Disaster recovery — Synology CSI PVCs
+# Disaster recovery, Synology CSI PVCs
 
 > **Scope**: backup and restore of PVCs backed by the Synology CSI driver (iSCSI LUNs, NFS shares, SMB shares).
 >
-> **Validation status**: only the iSCSI session purge procedure in `docs/OPERATIONS.md` has been executed end-to-end (marked `tested 2026-10-01`). The snapshot/restore, LUN-clone, and manual PV re-attach paths below are **untested — validate before relying on them** in a real disaster.
+> **Validation status**: only the iSCSI session purge procedure in `docs/OPERATIONS.md` has been executed end-to-end (marked `tested 2026-10-01`). The snapshot/restore, LUN-clone, and manual PV re-attach paths below are **untested, validate before relying on them** in a real disaster.
 
 ## Mental model: LUN vs share
 
@@ -10,9 +10,9 @@ Before planning DR, understand what the driver actually creates on DSM:
 
 | Protocol | What the driver creates on DSM | What Kubernetes sees | Backup implication |
 |---|---|---|---|
-| **iSCSI** | A **LUN** (block device) inside an existing volume group | A block PV, formatted with a filesystem (ext4/xfs) by the node | **Block-level** — you back up the LUN (snapshot, clone, or replication). The filesystem inside is opaque to DSM. |
-| **NFS** | A **shared folder** on a volume, with NFS export rules | A filesystem PV (the folder itself) | **File-level** — you back up the share contents (rsync, Synology Hyper Backup, etc.). DSM sees the files. |
-| **SMB** | A **shared folder** with SMB/CIFS sharing enabled | A filesystem PV | **File-level** — same as NFS. |
+| **iSCSI** | A **LUN** (block device) inside an existing volume group | A block PV, formatted with a filesystem (ext4/xfs) by the node | **Block-level**, you back up the LUN (snapshot, clone, or replication). The filesystem inside is opaque to DSM. |
+| **NFS** | A **shared folder** on a volume, with NFS export rules | A filesystem PV (the folder itself) | **File-level**, you back up the share contents (rsync, Synology Hyper Backup, etc.). DSM sees the files. |
+| **SMB** | A **shared folder** with SMB/CIFS sharing enabled | A filesystem PV | **File-level**, same as NFS. |
 
 **The LUN is block, the share is files.** This determines your backup strategy.
 
@@ -25,7 +25,7 @@ Before planning DR, understand what the driver actually creates on DSM:
 The Synology CSI driver supports `VolumeSnapshot` via the DSM API. This creates a point-in-time snapshot of the LUN on the NAS.
 
 **Prerequisites**:
-- `VolumeSnapshotClass` configured — rendered from `charts/synology-csi-ng/templates/storageclasses.yaml:20-29` when `volumeSnapshotClasses` is non-empty in values (empty by default)
+- `VolumeSnapshotClass` configured, rendered from `charts/synology-csi-ng/templates/storageclasses.yaml:20-29` when `volumeSnapshotClasses` is non-empty in values (empty by default)
 - Snapshotter sidecar running in the controller (default in our chart)
 
 **Backup**:
@@ -65,7 +65,7 @@ spec:
 
 **Velero integration**:
 
-Velero ≥ v1.15 ships CSI snapshot support built-in (the dedicated `velero-plugin-for-csi` repo is archived and returns 404). On our cluster (Velero v1.18.1) no extra plugin or `--features=EnableCSI` flag is needed — Velero discovers `VolumeSnapshotClass` resources natively. Configure the backup storage location and Velero will include CSI snapshots automatically:
+Velero ≥ v1.15 ships CSI snapshot support built-in (the dedicated `velero-plugin-for-csi` repo is archived and returns 404). On our cluster (Velero v1.18.1) no extra plugin or `--features=EnableCSI` flag is needed, Velero discovers `VolumeSnapshotClass` resources natively. Configure the backup storage location and Velero will include CSI snapshots automatically:
 
 ```bash
 velero install \
@@ -97,7 +97,7 @@ If you prefer to manage backups at the NAS level (or need to restore without Kub
 
 1. **DSM Control Panel** → **iSCSI Manager** → **LUN** → select the LUN → **Actions** → **Clone**
 2. The clone is a new LUN with the same data at the point in time
-3. To restore: delete the original PVC/PV, create a new PVC pointing to the cloned LUN (using `volumeHandle` in the PV spec — see "Manual PV re-attachment" below)
+3. To restore: delete the original PVC/PV, create a new PVC pointing to the cloned LUN (using `volumeHandle` in the PV spec, see "Manual PV re-attachment" below)
 
 **Pros**: works even if Kubernetes is down. **Cons**: manual, no automation.
 
@@ -138,7 +138,7 @@ DSM's built-in Hyper Backup can back up shared folders to external targets (S3, 
 
 When restoring a cluster from scratch (new Kubernetes, same DSM data), follow this order:
 
-1. **Driver first**: deploy the Synology CSI driver (Helm chart). The driver must be running before any PVCs are created or re-attached — it registers the CSI endpoint that kubelet talks to.
+1. **Driver first**: deploy the Synology CSI driver (Helm chart). The driver must be running before any PVCs are created or re-attached, it registers the CSI endpoint that kubelet talks to.
 
    ```bash
    helm upgrade --install synology-csi ./charts/synology-csi-ng \
@@ -146,11 +146,11 @@ When restoring a cluster from scratch (new Kubernetes, same DSM data), follow th
      --values my-values.yaml
    ```
 
-2. **StorageClass**: the chart renders `StorageClass` objects from `values.storageClasses` (empty by default). Provide your own values file with the classes you need (e.g. `synology-iscsi-storage`, `synology-nfs-storage`) and reinstall/upgrade — there are no StorageClasses until you configure them.
+2. **StorageClass**: the chart renders `StorageClass` objects from `values.storageClasses` (empty by default). Provide your own values file with the classes you need (e.g. `synology-iscsi-storage`, `synology-nfs-storage`) and reinstall/upgrade, there are no StorageClasses until you configure them.
 
-3. **VolumeSnapshotClass**: same model — rendered from `values.volumeSnapshotClasses` (empty by default). Only required if you use CSI snapshots.
+3. **VolumeSnapshotClass**: same model, rendered from `values.volumeSnapshotClasses` (empty by default). Only required if you use CSI snapshots.
 
-4. **PV re-attachment**: for **static PVs** (where you manually specify `volumeHandle`), the PV object must be recreated pointing to the existing LUN/share on DSM. For **dynamic PVCs** (where the driver created the LUN/share), Kubernetes will re-attach the existing PVC to the existing LUN/share automatically — the `volumeHandle` in the PV spec is the LUN UUID or share path, which does not change.
+4. **PV re-attachment**: for **static PVs** (where you manually specify `volumeHandle`), the PV object must be recreated pointing to the existing LUN/share on DSM. For **dynamic PVCs** (where the driver created the LUN/share), Kubernetes will re-attach the existing PVC to the existing LUN/share automatically, the `volumeHandle` in the PV spec is the LUN UUID or share path, which does not change.
 
    **Manual PV re-attachment** (if needed):
 
@@ -185,7 +185,7 @@ When restoring a cluster from scratch (new Kubernetes, same DSM data), follow th
 
 **Cause**: the iSCSI session on node A was not cleanly logged out (pod deletion timeout, node crash, etc.). DSM still thinks node A is connected, and some DSM versions reject new connections from the same IQN until the old session is cleared.
 
-**Fix**: see `docs/TESTING.md` — purge the stale session on DSM (iSCSI Manager → Connected Initiators → disconnect the old session) or log out from the old node if it is still reachable:
+**Fix**: see `docs/TESTING.md`, purge the stale session on DSM (iSCSI Manager → Connected Initiators → disconnect the old session) or log out from the old node if it is still reachable:
 
 ```bash
 # On the old node (if reachable):
@@ -195,7 +195,7 @@ iscsiadm -m node --logout
 # iSCSI Manager → Connected Initiators → select the stale session → Disconnect
 ```
 
-**Prevention**: consider setting `reclaimPolicy: Retain` on your StorageClasses (the chart default follows the upstream `reclaimPolicy: Delete` convention — see `values.yaml`). Retain keeps the PV/LUN alive after the PVC is deleted, which avoids the race where the driver deletes the LUN while the old session is still active.
+**Prevention**: consider setting `reclaimPolicy: Retain` on your StorageClasses (the chart default follows the upstream `reclaimPolicy: Delete` convention, see `values.yaml`). Retain keeps the PV/LUN alive after the PVC is deleted, which avoids the race where the driver deletes the LUN while the old session is still active.
 
 ### 32-char share name truncation
 

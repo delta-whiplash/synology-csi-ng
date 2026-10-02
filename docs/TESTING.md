@@ -44,7 +44,7 @@ kubectl exec csi-test -- cat /data/ok.txt
 
 ```sh
 kubectl delete pod csi-test --wait=true
-# wait for full volume detach before rescheduling — racing it produces
+# wait for full volume detach before rescheduling, racing it produces
 # Multi-Attach noise that is NOT a driver bug
 while kubectl get volumeattachments | grep -q csi-test; do sleep 4; done
 # reschedule on a different node
@@ -54,7 +54,7 @@ kubectl logs csi-test   # expect: ok-<first-hostname>
 
 ## 3. Known non-issues (do not file bugs for these)
 
-- `env: can't execute 'iscsiadm'` — the chart's `--chroot-dir` /
+- `env: can't execute 'iscsiadm'`, the chart's `--chroot-dir` /
   `--iscsiadm-path` flags are missing or wrong. This is a deployment
   config failure, not a driver bug.
 - First PVC creation takes 20-40 s (DSM API LUN creation + iSCSI attach

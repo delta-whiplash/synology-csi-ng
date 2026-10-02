@@ -1,4 +1,4 @@
-# Operations runbook — Synology CSI driver
+# Operations runbook, Synology CSI driver
 
 > **Last validated**: 2026-10-01, driver v1.4.0 (patched), DSM 7.x, Talos Linux.
 > **Audience**: cluster operators who need to upgrade, troubleshoot, or recover the driver.
@@ -27,7 +27,7 @@ helm list -n synology-csi
 helm repo update synology-csi-ng
 helm search repo synology-csi-ng/synology-csi-ng --versions
 
-# 3. Upgrade (controller first, then node DaemonSet — Helm handles this)
+# 3. Upgrade (controller first, then node DaemonSet, Helm handles this)
 helm upgrade synology-csi synology-csi-ng/synology-csi-ng \
   --namespace synology-csi \
   --values my-values.yaml \
@@ -93,7 +93,7 @@ kubectl -n synology-csi get pods -l app.kubernetes.io/name=synology-csi-ng,app.k
 # Check logs
 kubectl -n synology-csi logs -l app.kubernetes.io/name=synology-csi-ng,app.kubernetes.io/component=node --tail=100 | grep -i "error\|panic\|not found"
 
-# Check the CSI socket on the node (Talos has no SSH — use `talosctl ls` / `talosctl read`, or a privileged pod with hostPath `/` mounted at `/host` + `chroot /host`)
+# Check the CSI socket on the node (Talos has no SSH, use `talosctl ls` / `talosctl read`, or a privileged pod with hostPath `/` mounted at `/host` + `chroot /host`)
 # talosctl -n $NODE ls /var/lib/kubelet/plugins/csi.san.synology.com/
 # Should show csi.sock
 ```
@@ -103,7 +103,7 @@ kubectl -n synology-csi logs -l app.kubernetes.io/name=synology-csi-ng,app.kuber
 **Restart the node plugin pod on the affected node**:
 
 ```bash
-# Delete the pod — the DaemonSet will recreate it
+# Delete the pod, the DaemonSet will recreate it
 NODE=miracle
 POD=$(kubectl -n synology-csi get pods -l app.kubernetes.io/name=synology-csi-ng,app.kubernetes.io/component=node -o wide | grep $NODE | awk '{print $1}')
 kubectl -n synology-csi delete pod $POD
@@ -140,7 +140,7 @@ When a pod is evicted or a node crashes, the iSCSI session on the old node may n
 
 Privileged pod + `chroot /host` using the host's `iscsiadm`.
 
-Talos nodes have no SSH and no shell in the rootfs. The `synology-csi` namespace is already privileged, so run a one-shot pod on the affected node with `hostPID: true`, `hostNetwork: true`, and `/` mounted at `/host`. The pod image (alpine is fine) does NOT need `open-iscsi` — `iscsiadm` comes from the host rootfs via `chroot /host`.
+Talos nodes have no SSH and no shell in the rootfs. The `synology-csi` namespace is already privileged, so run a one-shot pod on the affected node with `hostPID: true`, `hostNetwork: true`, and `/` mounted at `/host`. The pod image (alpine is fine) does NOT need `open-iscsi`, `iscsiadm` comes from the host rootfs via `chroot /host`.
 
 ```yaml
 apiVersion: v1
@@ -177,7 +177,7 @@ kubectl exec -n synology-csi iscsi-fix -- chroot /host /usr/local/sbin/iscsiadm 
 
 # 2. Identify which PVC-UIDs are orphaned (LUN already deleted on DSM) vs still active.
 #    KEEP the session of any PVC still bound to a running pod
-#    (e.g. pvc-39cf71a9 = vmsingle — do NOT log this one out).
+#    (e.g. pvc-39cf71a9 = vmsingle, do NOT log this one out).
 
 # 3. Logout ONLY the stale/orphan targets, one by one, by IQN:
 kubectl exec -n synology-csi iscsi-fix -- \
@@ -192,13 +192,13 @@ kubectl exec -n synology-csi iscsi-fix -- chroot /host /usr/local/sbin/iscsiadm 
 kubectl -n synology-csi delete pod iscsi-fix
 ```
 
-⚠️ **Do NOT run `iscsiadm -m node --logout` without `-T <IQN>`** — that logs out every session, including volumes still in use.
+⚠️ **Do NOT run `iscsiadm -m node --logout` without `-T <IQN>`**, that logs out every session, including volumes still in use.
 
 **Option 3: Disconnect from DSM side**
 
 DSM → iSCSI Manager → Connected Initiators → select the stale session → **Disconnect**.
 
-This is the nuclear option — it disconnects the initiator even if it is still actively using the LUN. Use only when you are sure the session is stale.
+This is the nuclear option, it disconnects the initiator even if it is still actively using the LUN. Use only when you are sure the session is stale.
 
 ---
 
@@ -222,12 +222,12 @@ DSM → Shared Folder → select the PVC share → Edit → NFS Permissions. Ver
 - **Enable NFS service** is checked
 - **Hostname or IP** matches the node IP (not the pod IP, not the cluster CIDR)
 - **Privilege** is Read/Write (or Read-only if that is what you want)
-- **Squash** is set correctly (default is `root` — see below)
+- **Squash** is set correctly (default is `root`, see below)
 - **Security flavor** is `sys` (kerberos is not supported by the driver)
 
 **2. Check the mount options**
 
-The driver passes `mountOptions` from the StorageClass through to the mount call (`pkg/driver/nodeserver.go:842`) — it does NOT inject `nolock,vers=3` on its own. Configure them on the StorageClass (e.g. `mountOptions: [nolock, vers=3]`). If you are manually mounting to test:
+The driver passes `mountOptions` from the StorageClass through to the mount call (`pkg/driver/nodeserver.go:842`), it does NOT inject `nolock,vers=3` on its own. Configure them on the StorageClass (e.g. `mountOptions: [nolock, vers=3]`). If you are manually mounting to test:
 
 ```bash
 # On the node:
@@ -249,13 +249,13 @@ The driver hardcodes `RootSquash: "root"` in `pkg/driver/nodeserver.go:460`. Thi
 
 **4. Check the share name truncation**
 
-If the share name on DSM is truncated to 32 chars but the driver mounts the full name, the mount fails server-side. NOTE: this is an upstream bug on the mount path, NOT fixed in our builds — see `docs/CODE-REVIEW-v1.4.0.md` (finding m1).
+If the share name on DSM is truncated to 32 chars but the driver mounts the full name, the mount fails server-side. NOTE: this is an upstream bug on the mount path, NOT fixed in our builds, see `docs/CODE-REVIEW-v1.4.0.md` (finding m1).
 
 **5. Check DSM logs**
 
 DSM → Log Center → filter by "NFS" or "File Services". Look for:
-- `NFS_SHARE_LOAD_FAIL` (error 2370) — concurrent saves lost the rule
-- `NFS_SHARE_NOT_FOUND` — the share does not exist (truncation issue)
+- `NFS_SHARE_LOAD_FAIL` (error 2370), concurrent saves lost the rule
+- `NFS_SHARE_NOT_FOUND`, the share does not exist (truncation issue)
 
 ---
 
@@ -274,7 +274,7 @@ resources:
     memory: 128Mi
   limits:
     memory: 256Mi
-    # No CPU limit — see pemberton-cluster conventions (CFS throttling on N100)
+    # No CPU limit, see pemberton-cluster conventions (CFS throttling on N100)
 ```
 
 ### VPA-style sizing
