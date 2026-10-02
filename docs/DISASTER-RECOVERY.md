@@ -26,7 +26,7 @@ The Synology CSI driver supports `VolumeSnapshot` via the DSM API. This creates 
 
 **Prerequisites**:
 - `VolumeSnapshotClass` configured, rendered from `charts/synology-csi-ng/templates/storageclasses.yaml:20-29` when `volumeSnapshotClasses` is non-empty in values (empty by default)
-- Snapshotter sidecar running in the controller (default in our chart)
+- Snapshotter sidecar running (deployed as its own `synology-csi-ng-snapshotter` Deployment in our chart)
 
 **Backup**:
 

@@ -1,6 +1,6 @@
 # Operations runbook, Synology CSI driver
 
-> **Last validated**: 2026-10-01, driver v1.4.0 (patched), DSM 7.x, Talos Linux.
+> **Last validated**: 2026-10-01, driver v1.4.0 (patched), DSM 7.x, Talos Linux. Only the stale iSCSI session purge procedure below has been executed end-to-end (marked `tested 2026-10-01`); the other procedures are reviewed but untested on this cluster, validate before relying on them.
 > **Audience**: cluster operators who need to upgrade, troubleshoot, or recover the driver.
 
 ---
@@ -81,7 +81,7 @@ Unable to attach or mount volumes: unmounted volumes=[data],
 unattached volumes=[data]: timed out waiting for the condition
 ```
 
-The `synology-csi-node` pod on that node is in `CrashLoopBackOff` or `Error` state, or the CSI socket is missing.
+The `synology-csi-ng-node` pod on that node is in `CrashLoopBackOff` or `Error` state, or the CSI socket is missing.
 
 ### Diagnosis
 
@@ -194,7 +194,7 @@ kubectl -n synology-csi delete pod iscsi-fix
 
 ⚠️ **Do NOT run `iscsiadm -m node --logout` without `-T <IQN>`**, that logs out every session, including volumes still in use.
 
-**Option 3: Disconnect from DSM side**
+**Alternative: Disconnect from DSM side**
 
 DSM → iSCSI Manager → Connected Initiators → select the stale session → **Disconnect**.
 
