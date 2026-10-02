@@ -190,6 +190,16 @@ If you arrived here by searching one of them: yes, this chart fixes it.
 | `access denied by server` on NFS mounts of driver-created shares | DSM export/squash handling of driver-created rules | Under investigation, see the NFS section of [docs/CODE-REVIEW-v1.4.0.md](docs/CODE-REVIEW-v1.4.0.md) |
 | `Failed to inspect image` / short-name mode errors (CRI-O) | Unqualified image references | ✅ fixed, fully-qualified refs by default |
 
+## Community
+
+**Issues and pull requests are welcome, with pleasure.** Whether you run Talos, k3s, OpenShift, kubeadm or something stranger: if you hit a bug, need a platform profile, or want a driver fix, open an issue. PRs are reviewed fast and honestly (strict review pass + real-cluster validation), and driver-level fixes ship as reviewed patches in our builds while they wait for upstream.
+
+- 🐛 [Open an issue](https://github.com/delta-whiplash/synology-csi-ng/issues/new) — include your platform, DSM version, and the exact error string (see the Troubleshooting table)
+- 🔧 [Open a PR](CONTRIBUTING.md) — one fix per branch, tests over patches, CI gates everything
+- 💬 [Discussions](https://github.com/delta-whiplash/synology-csi-talos-ng/discussions) — for platform profiles, NFS/iSCSI war stories, and everything in between
+
+Every report helps: the 63-issue upstream backlog gets shorter because people like you file what breaks.
+
 ## Documentation
 
 - [docs/TESTING.md](docs/TESTING.md), the functional validation protocol (the one used to certify every release here)
