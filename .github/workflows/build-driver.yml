@@ -231,31 +231,30 @@ jobs:
         run: |
           cosign sign --yes "ghcr.io/${{ github.repository_owner }}/synology-csi:${IMAGE_TAG}"
 
-      - name: Make the package public
+      - name: Verify anonymous pull (visibility gate)
         run: |
           # New GHCR packages default to private; a CSI driver image is
           # useless to cluster nodes if they cannot pull it anonymously.
-          # Check first: a package already public returns 404 on the PATCH
-          # (and used to fail this gate despite being perfectly pullable).
-          sleep 5  # let the registry index the new package
-          VISIBILITY=$(gh api "user/packages/container/synology-csi" --jq .visibility 2>/dev/null || echo unknown)
-          if [ "$VISIBILITY" = "public" ]; then
-            echo "package already public"; exit 0
-          fi
+          # Source of truth = the anonymous registry flow (token + manifest),
+          # exactly what a node does. The packages REST API is NOT usable
+          # here: GET/PATCH on /user/packages/* 404 with GITHUB_TOKEN for
+          # user-owned packages, and PATCH 404s on already-public packages.
+          IMAGE="delta-whiplash/synology-csi:${IMAGE_TAG}"
           ok=0
           for i in $(seq 1 10); do
-            if gh api --method PATCH \
-                "user/packages/container/synology-csi" \
-                -f visibility=public 2>/dev/null; then
-              echo "package set to public"
-              ok=1
-              break
-            fi
-            sleep 5
+            TOKEN=$(curl -fsS "https://ghcr.io/token?scope=repository:${IMAGE}:pull" | jq -r .token) && \
+            CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+              -H "Authorization: Bearer $TOKEN" \
+              -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json" \
+              "https://ghcr.io/v2/${IMAGE}/manifests/${IMAGE_TAG}") || CODE=000
+            if [ "$CODE" = "200" ]; then ok=1; break; fi
+            echo "anonymous pull not ready yet (HTTP $CODE), retry ${i}/10"
+            sleep 15
           done
           if [ "$ok" -ne 1 ]; then
-            echo "::error::failed to set GHCR package to public after 10 retries — image will be unpullable by cluster nodes"
+            echo "::error::image ghcr.io/${IMAGE} is NOT anonymously pullable (HTTP $CODE after 10 tries). Flip it public manually: https://github.com/users/delta-whiplash/packages/container/synology-csi/settings — GITHUB_TOKEN cannot manage user-owned package visibility."
             exit 1
           fi
+          echo "image anonymously pullable: ghcr.io/${IMAGE}"
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE_TAG: ${{ env.IMAGE_TAG }}
