@@ -38,7 +38,7 @@ RUN env GOARCH=$(echo "$TARGETPLATFORM" | cut -f2 -d/) \
 FROM alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
 RUN apk add --no-cache \
         e2fsprogs e2fsprogs-extra xfsprogs xfsprogs-extra blkid util-linux \
-        iproute2 bash ca-certificates cifs-utils nfs-utils nvme-cli
+        iproute2 bash btrfs-progs ca-certificates cifs-utils nfs-utils nvme-cli
 
 COPY LICENSE /licenses/LICENSE
 WORKDIR /
