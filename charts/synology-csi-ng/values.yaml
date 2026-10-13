@@ -76,6 +76,12 @@ clientInfoSecret:
   #    #   -----END CERTIFICATE-----
   #    # tlsServerName: ""          # override when connecting by IP
   #    # insecureSkipVerify: false  # last resort; prefer tlsCACert
+  #    # Optional iSCSI CHAP: when BOTH are set, every target this DSM hosts
+  #    # is created with CHAP (auth_type=1) using these credentials, and the
+  #    # initiators must present them. Requires a driver build with patch
+  #    # 0005 (v1.4.0-ng.x). Set neither or both (half-configured is rejected).
+  #    # iscsiuser: ""
+  #    # iscsipass: ""
 
 # -- StorageClasses to create (map name -> spec). Empty by default.
 # Example:
