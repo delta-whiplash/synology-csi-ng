@@ -111,16 +111,29 @@ jobs:
 
       - name: Smoke test — host tools embedded in runtime image
         run: |
-          # The runtime image must ship mkfs.xfs and nvme-cli — the CSI node
-          # DaemonSet relies on both at runtime. iscsiadm is intentionally
-          # NOT in the image: on Talos the host provides it, bind-mounted
-          # into the node container via hostTools.iscsiadmPath.
+          # The runtime image must ship mkfs.xfs, nvme-cli and btrfs-progs —
+          # the CSI node DaemonSet relies on them at runtime. btrfs-progs is
+          # not cosmetic: mount-utils' resize path runs `btrfs inspect-internal
+          # dump-super` for btrfs-formatted volumes (pkg/driver/nodeserver.go
+          # NeedResize), and its absence fails the resize with codes.Internal
+          # instead of degrading — which is why it is asserted below rather
+          # than merely reported. iscsiadm is intentionally NOT in the image:
+          # on Talos the host provides it, bind-mounted into the node container
+          # via hostTools.iscsiadmPath.
           docker run --rm --entrypoint /bin/sh synology-csi:smoke-test -c '
             set -eu
             echo "--- mkfs.xfs ---"
             mkfs.xfs -V
             echo "--- nvme ---"
             nvme version || true
+            echo "--- btrfs ---"
+            btrfs --version
+            mkfs.btrfs -V
+            echo "--- btrfs resize path (mount-utils resize_linux btrfs case) ---"
+            dd if=/dev/zero of=/tmp/btrfs.img bs=1M count=256 status=none
+            mkfs.btrfs -f /tmp/btrfs.img >/dev/null
+            btrfs inspect-internal dump-super -f /tmp/btrfs.img | head -1
+            rm -f /tmp/btrfs.img
             echo "--- iscsiadm (INFO) ---"
             if command -v iscsiadm >/dev/null 2>&1 || [ -x /usr/local/sbin/iscsiadm ]; then
               echo "INFO: iscsiadm present in image"
