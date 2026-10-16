@@ -10,10 +10,15 @@
 # v1.4.0 source (Synology released the code but never published an image —
 # their v1.4.0 Dockerfile requires RHEL entitlement). Built unmodified from
 # the upstream v1.4.0 tag by .github/workflows/build-driver.yml.
+# The tag names its own content and is never rewritten: -stock.x is unmodified
+# upstream code, -ng.x carries the reviewed driver patches. This default is the
+# unmodified series; switch with driver.tag. driver.digest stays empty on
+# purpose: it wins over the tag in the template, so a default digest would
+# silently defeat any tag override.
 # Fallback to the last official image: docker.io/synology/synology-csi + v1.3.1
 driver:
   image: ghcr.io/delta-whiplash/synology-csi
-  tag: v1.4.0
+  tag: v1.4.0-stock.2
   digest: ""             # e.g. sha256:... — takes precedence over tag when set
   pullPolicy: IfNotPresent
 

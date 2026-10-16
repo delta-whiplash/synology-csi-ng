@@ -1,8 +1,8 @@
 # synology-csi-ng
 
 [![Lint](https://github.com/delta-whiplash/synology-csi-ng/actions/workflows/lint.yml/badge.svg)](https://github.com/delta-whiplash/synology-csi-ng/actions/workflows/lint.yml)
-[![Release chart](https://github.com/delta-whiplash/synology-csi-talos-ng/actions/workflows/release-chart.yml/badge.svg)](https://github.com/delta-whiplash/synology-csi-talos-ng/actions/workflows/release-chart.yml)
-[![Driver build](https://github.com/delta-whiplash/synology-csi-talos-ng/actions/workflows/build-driver.yml/badge.svg)](https://github.com/delta-whiplash/synology-csi-talos-ng/actions/workflows/build-driver.yml)
+[![Release chart](https://github.com/delta-whiplash/synology-csi-ng/actions/workflows/release-chart.yml/badge.svg)](https://github.com/delta-whiplash/synology-csi-ng/actions/workflows/release-chart.yml)
+[![Driver build](https://github.com/delta-whiplash/synology-csi-ng/actions/workflows/build-driver.yml/badge.svg)](https://github.com/delta-whiplash/synology-csi-ng/actions/workflows/build-driver.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![Upstream](https://img.shields.io/badge/upstream-SynologyOpenSource%2Fsynology--csi-232c95)](https://github.com/SynologyOpenSource/synology-csi)
 [![PRs upstream](https://img.shields.io/badge/PR%20upstream-%23151-blue)](https://github.com/SynologyOpenSource/synology-csi/pull/151)
@@ -20,7 +20,7 @@ The official driver is good software with a broken delivery pipeline. The eviden
 | Symptom | Reality |
 |---|---|
 | **63 open issues** (2021→2026) | Ranging from one-line docs gaps to multi-year broken features |
-| **v1.4.0 released with no image** | The source tag exists; their own Dockerfile (UBI9) requires a RHEL entitlement and was never built/published, `docker pull synology/synology-csi:v1.4.0` returns 404. [We build it](https://github.com/delta-whiplash/synology-csi-talos-ng/pkgs/container/synology-csi) from the unmodified tag. |
+| **v1.4.0 released with no image** | The source tag exists; their own Dockerfile (UBI9) requires a RHEL entitlement and was never built/published, `docker pull synology/synology-csi:v1.4.0` returns 404. [We build it](https://github.com/delta-whiplash/synology-csi-ng/pkgs/container/synology-csi) from the unmodified tag. |
 | **Talos Linux broken since v1.2.1** | The driver chroots into the host to run `iscsiadm`; Talos keeps it in `/usr/local/sbin`, outside the paths the driver resolves, every stock deployment fails at mount time with `env: can't execute 'iscsiadm'` |
 | **NFS provisioning partially broken** | DSM truncates share names at 32 chars (handled by `GenShareName` since v1.1.0); the remaining mount failures trace to DSM export-table handling of driver-created shares (documented, under investigation upstream) |
 | **Sidecars from 2023** | Older charts pin `csi-provisioner:v3.0.0`-era sidecars that upstream SIG-Storage no longer supports |
@@ -46,7 +46,7 @@ None of this is exotic. Every one of these was reproduced, traced to a specific 
 ```
 
 1. **A hardened Helm chart** that passes the flags upstream charts forget (`--chroot-dir`, `--iscsiadm-path`), ships current CSI sidecars, least-privilege RBAC, and platform profiles. **Every container in the chart (driver + all sidecars) runs with a locked-down securityContext**, no privilege escalation, all caps dropped, readOnlyRootFilesystem, seccomp RuntimeDefault, non-root where the CSI contract allows it.
-2. **Driver builds you can trust**, official images when Synology publishes them, and unmodified-tag builds (e.g. v1.4.0) or reviewed-patch builds (`v1.4.0-ng.x`) from our CI when they don't. Every build passes the smoke tests and the driver's own `-race` test suite before push.
+2. **Driver builds you can trust**, official images when Synology publishes them, and two build series from our CI when they don't: `v1.4.0-stock.x` (unmodified upstream code, the chart default) and `v1.4.0-ng.x` (the reviewed patch series). A published tag is never rewritten, and every build passes the smoke tests and the driver's own `-race` test suite before push.
 3. **A curated fix backlog**: upstream's 63 open issues triaged in [docs/BACKLOG.md](docs/BACKLOG.md), the chart-level ones fixed here, the driver-level ones applied as reviewed patches and proposed upstream ([PR #151](https://github.com/SynologyOpenSource/synology-csi/pull/151)).
 4. **Production-hardened docs**: [TESTING.md](docs/TESTING.md) (the live validation protocol), [OPERATIONS.md](docs/OPERATIONS.md) (runbook: upgrades, stale iSCSI session purge, tested, NFS diagnostics), [DISASTER-RECOVERY.md](docs/DISASTER-RECOVERY.md), [CODE-REVIEW-v1.4.0.md](docs/CODE-REVIEW-v1.4.0.md) (security/perf/stability sweep, every finding with `file:line`).
 
@@ -70,8 +70,8 @@ All patches are reviewed (independent GLM review + mutation testing), TDD'd, and
 | v1.1.3 | official ✅ | legacy profile (PATH-shim era) |
 | v1.2.0 – v1.2.1 | official ✅ | ✅ |
 | v1.3.0 / v1.3.1 | official ✅ | ✅ |
-| v1.4.0 | ❌ upstream never published | ✅ **default**, [our GHCR](https://github.com/delta-whiplash/synology-csi-talos-ng/pkgs/container/synology-csi) |
-| v1.4.0-**ng.2/ng.3** (reviewed patch builds) | ✅ our GHCR | ✅ **running in production here** |
+| v1.4.0 | ❌ upstream never published | ✅ `v1.4.0-stock.x` (unmodified, **chart default**), [our GHCR](https://github.com/delta-whiplash/synology-csi-ng/pkgs/container/synology-csi) |
+| v1.4.0-**ng.x** (reviewed patch builds) | ✅ our GHCR | ✅ **running in production here** (currently `v1.4.0-ng.4`) |
 
 ### Platforms
 
@@ -142,7 +142,9 @@ fullnameOverride: synology-csi
 
 driver:
   image: ghcr.io/delta-whiplash/synology-csi
-  tag: v1.4.0-ng.3       # our reviewed patch build (v1.4.0 + 0001-0003)
+  tag: v1.4.0-ng.4       # reviewed patch build (v1.4.0 + patches 0001-0004)
+  # digest: sha256:95ec9e2376cba94fba7bab11dac49bc147f0ec73efd08267bb8bbb9ee873980c
+  #   pin the digest for bit-for-bit reproducibility; it takes precedence over the tag
 
 clientInfoSecret:
   create: false          # bring your own Secret/SealedSecret (key: client-info.yml)
@@ -160,7 +162,7 @@ storageClasses:
 
 ```sh
 helm install synology-csi oci://ghcr.io/delta-whiplash/charts/synology-csi-ng \
-  --version 0.6.1 -n synology-csi --create-namespace -f values-talos.yaml
+  --version 0.6.2 -n synology-csi --create-namespace -f values-talos.yaml
 ```
 
 Classic HTTPS repo also available: `helm repo add synology-csi-ng https://delta-whiplash.github.io/synology-csi-ng`.
@@ -196,7 +198,7 @@ If you arrived here by searching one of them: yes, this chart fixes it.
 
 - 🐛 [Open an issue](https://github.com/delta-whiplash/synology-csi-ng/issues/new) — include your platform, DSM version, and the exact error string (see the Troubleshooting table)
 - 🔧 [Open a PR](CONTRIBUTING.md) — one fix per branch, tests over patches, CI gates everything
-- 💬 [Discussions](https://github.com/delta-whiplash/synology-csi-talos-ng/discussions) — for platform profiles, NFS/iSCSI war stories, and everything in between
+- 💬 [Discussions](https://github.com/delta-whiplash/synology-csi-ng/discussions) — for platform profiles, NFS/iSCSI war stories, and everything in between
 
 Every report helps: the 63-issue upstream backlog gets shorter because people like you file what breaks.
 
