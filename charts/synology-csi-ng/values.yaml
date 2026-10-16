@@ -78,8 +78,9 @@ clientInfoSecret:
   #    # insecureSkipVerify: false  # last resort; prefer tlsCACert
   #    # Optional iSCSI CHAP: when BOTH are set, every target this DSM hosts
   #    # is created with CHAP (auth_type=1) using these credentials, and the
-  #    # initiators must present them. Requires a driver build with patch
-  #    # 0005 (v1.4.0-ng.x). Set neither or both (half-configured is rejected).
+  #    # initiators must present them. Requires a driver build with patches
+  #    # 0005+0006 (v1.4.0-ng.x: target side + initiator login). Set neither
+  #    # or both (half-configured is rejected).
   #    # iscsiuser: ""
   #    # iscsipass: ""
 
