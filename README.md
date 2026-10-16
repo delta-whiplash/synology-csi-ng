@@ -60,6 +60,7 @@ All patches are reviewed (independent GLM review + mutation testing), TDD'd, and
 | `0002` | security/stability | Data races on DSM sessions fixed (mutex + serialized re-login), DSM password moved out of GET query strings and redacted from debug logs, HTTP timeouts, parsing panics guarded (multipath lsblk, IQN split) |
 | `0003` | Issues | Talos chroot fallback (#130 family), capacity clamp to DSM minimum (#104), digits-only namespace sanitization (#134), `mountPermissions` NFS documented (#95) |
 | `0004` | Features | `minVolumeSize` StorageClass parameter (CreateVolume-only floor), overflow-guarded parsing, CHAP **groundwork** (`TargetSetAuth` webapi), full CHAP deferred until `ControllerPublish/UnpublishVolume` wiring exists |
+| `0005` | Features | Optional iSCSI CHAP: `iscsiuser`/`iscsipass` in `client-info.yml` are applied to every target the DSM creates (auth_type=1 at creation); unset or half-configured falls back to the upstream no-auth behavior |
 
 ## Compatibility
 
@@ -91,7 +92,7 @@ All patches are reviewed (independent GLM review + mutation testing), TDD'd, and
 | Resize | ✅ | ✅ | ✅ |
 | Configurable `minVolumeSize` floor | ✅ (patch 0004, CreateVolume only; expansion paths use no floor) |, |, |
 | `mountPermissions` (NFS/SMB) | n/a (block) | ✅ documented | ✅ |
-| iSCSI CHAP auth | ⏳ **deferred**, groundwork in 0004 (`TargetSetAuth` webapi); full feature requires `ControllerPublish/UnpublishVolume` wiring (tracked, not shipped) |, |, |
+| iSCSI CHAP auth | ✅ **global CHAP** via `iscsiuser`/`iscsipass` in `client-info.yml` (patch 0005, requires a patched driver build); per-volume CHAP from secrets still deferred (needs `ControllerPublish/UnpublishVolume` wiring) |, |, |
 
 <details><summary>Example, StorageClass with custom minVolumeSize</summary>
 
