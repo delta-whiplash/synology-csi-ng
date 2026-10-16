@@ -7,7 +7,7 @@
 [![Upstream](https://img.shields.io/badge/upstream-SynologyOpenSource%2Fsynology--csi-232c95)](https://github.com/SynologyOpenSource/synology-csi)
 [![PRs upstream](https://img.shields.io/badge/PR%20upstream-%23151-blue)](https://github.com/SynologyOpenSource/synology-csi/pull/151)
 
-**The maintained, production-grade distribution of the [official Synology CSI driver](https://github.com/SynologyOpenSource/synology-csi), for Talos Linux, k3s, OpenShift, kubeadm and anywhere the upstream deployment story falls short.** Running in production on a 3-node Talos cluster against DSM/Xpenology.
+**The maintained, production-grade distribution of the [official Synology CSI driver](https://github.com/SynologyOpenSource/synology-csi), for Talos Linux, k3s, OpenShift, kubeadm and anywhere the upstream deployment story falls short.** Running in production on a 3-node Talos cluster against a DSM backend.
 
 > **Our deal with upstream: *help without depending*.** Everything we fix is packaged so it can be pushed upstream, and everything we ship works even if upstream never merges it. You should not have to choose between a maintained project and a driver that works on your platform, you get both here.
 
@@ -24,7 +24,7 @@ The official driver is good software with a broken delivery pipeline. The eviden
 | **Talos Linux broken since v1.2.1** | The driver chroots into the host to run `iscsiadm`; Talos keeps it in `/usr/local/sbin`, outside the paths the driver resolves, every stock deployment fails at mount time with `env: can't execute 'iscsiadm'` |
 | **NFS provisioning partially broken** | DSM truncates share names at 32 chars (handled by `GenShareName` since v1.1.0); the remaining mount failures trace to DSM export-table handling of driver-created shares (documented, under investigation upstream) |
 | **Sidecars from 2023** | Older charts pin `csi-provisioner:v3.0.0`-era sidecars that upstream SIG-Storage no longer supports |
-| **[PR #151](https://github.com/SynologyOpenSource/synology-csi/pull/151) opened** | Our Talos + Xpenology fixes proposed back to upstream, *help without depending* |
+| **[PR #151](https://github.com/SynologyOpenSource/synology-csi/pull/151) opened** | Our Talos + DSM hardening fixes proposed back to upstream, *help without depending* |
 
 None of this is exotic. Every one of these was reproduced, traced to a specific file and line, and fixed or worked around here, with the evidence published.
 
@@ -42,7 +42,7 @@ None of this is exotic. Every one of these was reproduced, traced to a specific 
 │         │  SCs, VolumeSnapshotClasses, RBAC, secrets, profiles     │
 └─────────┼───────────────────────────────────────────────────────────┘
           ▼
-   YOUR SYNOLOGY / XPEROLOGY NAS (DSM API + iSCSI + NFS)
+   YOUR SYNOLOGY NAS (DSM API + iSCSI + NFS)
 ```
 
 1. **A hardened Helm chart** that passes the flags upstream charts forget (`--chroot-dir`, `--iscsiadm-path`), ships current CSI sidecars, least-privilege RBAC, and platform profiles. **Every container in the chart (driver + all sidecars) runs with a locked-down securityContext**, no privilege escalation, all caps dropped, readOnlyRootFilesystem, seccomp RuntimeDefault, non-root where the CSI contract allows it.
@@ -56,7 +56,7 @@ All patches are reviewed (independent GLM review + mutation testing), TDD'd, and
 
 | Patch | Fixes | What it does |
 |---|---|---|
-| `0001` | NFS | `root_squash` configurable via `CSI_NFS_ROOT_SQUASH` env (default `root` = upstream; empty = no squash, required on Xpenology), 2370 (`NFS_SHARE_LOAD_FAIL`) save retry |
+| `0001` | NFS | `root_squash` configurable via `CSI_NFS_ROOT_SQUASH` env (default `root` = upstream; empty = no squash, which some DSM deployments require), 2370 (`NFS_SHARE_LOAD_FAIL`) save retry |
 | `0002` | security/stability | Data races on DSM sessions fixed (mutex + serialized re-login), DSM password moved out of GET query strings and redacted from debug logs, HTTP timeouts, parsing panics guarded (multipath lsblk, IQN split) |
 | `0003` | Issues | Talos chroot fallback (#130 family), capacity clamp to DSM minimum (#104), digits-only namespace sanitization (#134), `mountPermissions` NFS documented (#95) |
 | `0004` | Features | `minVolumeSize` StorageClass parameter (CreateVolume-only floor), overflow-guarded parsing, CHAP **groundwork** (`TargetSetAuth` webapi), full CHAP deferred until `ControllerPublish/UnpublishVolume` wiring exists |
@@ -174,6 +174,7 @@ Upstream's open issues are triaged in [docs/BACKLOG.md](docs/BACKLOG.md): what e
 - ✅ fixed here: image publication (#149), CRI-O refs (#128/#129), OCI chart (#112), chart login failures (#105), RBAC secrets overreach (#47, for real: the node role was trimmed to `nodes [get,list,watch]`), securityContext (#30, every container)
 - 🔧 driver patches applied to our builds: Talos chroot fallback (#130 family), NFS 2370 retry (#140/#139), capacity clamp (#104), namespace sanitization (#134), configurable NFS `root_squash`
 - 🔍 **a full code audit of driver v1.4.0** lives in [docs/CODE-REVIEW-v1.4.0.md](docs/CODE-REVIEW-v1.4.0.md): 4 critical (data races on DSM sessions, DSM passwords in GET query strings + debug logs, no HTTP timeouts, unrecovered panics on multipath/iSCSI parsing), 11 major (dead NVMe session detection, iSCSI targets created without auth, #82/#63 confirmed at code level, SMB passwords unescaped, #59, N+1 API storms on the kubelet stats path), 9 minor, each with file:line and a suggested fix. These findings are the roadmap for our patched builds and the material for upstream PRs.
+- ⏳ upstream [PR #151](https://github.com/SynologyOpenSource/synology-csi/pull/151) is open and awaiting review: 6 changes, all backwards-compatible. Upstream merges community contributions slowly (last merge at the time of writing: January 2026), so the reviewed patches also ship in our `v1.4.0-ng.x` builds rather than waiting.
 - 📋 tracked upstream: share naming (#121/#92/#96), CHAP full wiring, metrics (#36), and the rest of the triage in the backlog
 
 ## Troubleshooting, every known error, mapped
