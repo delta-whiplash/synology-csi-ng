@@ -8,6 +8,11 @@ name: Build driver image
 # checkout so our builds can ship driver fixes (NFS root_squash, 2370 retry…)
 # while we wait for upstream PRs to land.
 #
+# Two artifact series, distinguished by the tag, because a tag must describe
+# its own content and a published tag is never rewritten:
+#   v1.4.0-ng.<n>     apply_patches=true    reviewed driver patches included
+#   v1.4.0-stock.<n>  apply_patches=false   unmodified upstream driver code
+#
 # Pipeline:
 #   1. build-test  — build amd64 locally (--load), smoke-test the resulting
 #                    binary and the host tooling embedded in the image
@@ -24,10 +29,13 @@ on:
         description: "Upstream SynologyOpenSource/synology-csi git ref (tag)"
         required: true
         default: v1.4.0
+      apply_patches:
+        description: "Apply patches/<upstream_ref>/*.patch. Set to false for an unmodified-tag (stock) build."
+        type: boolean
+        default: true
       image_tag:
-        description: "Optional image tag override. When empty, defaults to upstream_ref."
-        required: false
-        default: ""
+        description: "Tag to publish. Required: every published artifact carries an explicit identity, never one implied by upstream_ref."
+        required: true
 
 permissions:
   contents: read
@@ -51,16 +59,36 @@ jobs:
           fi
           echo "UPSTREAM_REF_VALIDATED=$UPSTREAM_REF" >> "$GITHUB_ENV"
 
-      - name: Resolve image tag
+      - name: Resolve and validate image tag
         env:
           REQUESTED_TAG: ${{ inputs.image_tag }}
-          DEFAULT_TAG: ${{ env.UPSTREAM_REF_VALIDATED }}
+          APPLY_PATCHES: ${{ inputs.apply_patches }}
         run: |
-          if [ -n "$REQUESTED_TAG" ]; then
-            echo "IMAGE_TAG=$REQUESTED_TAG" >> "$GITHUB_ENV"
-          else
-            echo "IMAGE_TAG=$DEFAULT_TAG" >> "$GITHUB_ENV"
+          set -euo pipefail
+          if [ -z "$REQUESTED_TAG" ]; then
+            echo "::error::image_tag is required — a published artifact must carry an explicit identity"
+            exit 1
           fi
+          # A published tag is never rewritten, so it has to describe its own
+          # content: <upstream_ref>-<series>.<n>. The series names what is
+          # inside — 'ng' for reviewed driver patches, 'stock' for unmodified
+          # upstream code. A bare upstream-looking tag understates what it
+          # contains, which is how a consumer ends up running patched code
+          # believing it is stock, or the reverse.
+          if ! echo "$REQUESTED_TAG" | grep -qE -- '-[a-z][a-z0-9]*\.[0-9]+$'; then
+            echo "::error::tag '${REQUESTED_TAG}' has no series suffix; expected <upstream_ref>-ng.<n> (patched) or <upstream_ref>-stock.<n> (unmodified)"
+            exit 1
+          fi
+          if [ "$APPLY_PATCHES" = "true" ] && ! echo "$REQUESTED_TAG" | grep -qE -- '-ng\.[0-9]+$'; then
+            echo "::error::apply_patches=true but tag '${REQUESTED_TAG}' is not in the -ng.<n> series"
+            exit 1
+          fi
+          if [ "$APPLY_PATCHES" != "true" ] && echo "$REQUESTED_TAG" | grep -q -- '-ng\.'; then
+            echo "::error::apply_patches=false but tag '${REQUESTED_TAG}' claims the -ng (patched) series"
+            exit 1
+          fi
+          echo "IMAGE_TAG=$REQUESTED_TAG" >> "$GITHUB_ENV"
+          echo "APPLY_PATCHES=$APPLY_PATCHES" >> "$GITHUB_ENV"
 
       - name: Checkout upstream source at ${{ env.UPSTREAM_REF_VALIDATED }}
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -70,6 +98,7 @@ jobs:
           path: upstream
 
       - name: Apply project patches
+        if: env.APPLY_PATCHES == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -172,16 +201,36 @@ jobs:
           fi
           echo "UPSTREAM_REF_VALIDATED=$UPSTREAM_REF" >> "$GITHUB_ENV"
 
-      - name: Resolve image tag
+      - name: Resolve and validate image tag
         env:
           REQUESTED_TAG: ${{ inputs.image_tag }}
-          DEFAULT_TAG: ${{ env.UPSTREAM_REF_VALIDATED }}
+          APPLY_PATCHES: ${{ inputs.apply_patches }}
         run: |
-          if [ -n "$REQUESTED_TAG" ]; then
-            echo "IMAGE_TAG=$REQUESTED_TAG" >> "$GITHUB_ENV"
-          else
-            echo "IMAGE_TAG=$DEFAULT_TAG" >> "$GITHUB_ENV"
+          set -euo pipefail
+          if [ -z "$REQUESTED_TAG" ]; then
+            echo "::error::image_tag is required — a published artifact must carry an explicit identity"
+            exit 1
           fi
+          # A published tag is never rewritten, so it has to describe its own
+          # content: <upstream_ref>-<series>.<n>. The series names what is
+          # inside — 'ng' for reviewed driver patches, 'stock' for unmodified
+          # upstream code. A bare upstream-looking tag understates what it
+          # contains, which is how a consumer ends up running patched code
+          # believing it is stock, or the reverse.
+          if ! echo "$REQUESTED_TAG" | grep -qE -- '-[a-z][a-z0-9]*\.[0-9]+$'; then
+            echo "::error::tag '${REQUESTED_TAG}' has no series suffix; expected <upstream_ref>-ng.<n> (patched) or <upstream_ref>-stock.<n> (unmodified)"
+            exit 1
+          fi
+          if [ "$APPLY_PATCHES" = "true" ] && ! echo "$REQUESTED_TAG" | grep -qE -- '-ng\.[0-9]+$'; then
+            echo "::error::apply_patches=true but tag '${REQUESTED_TAG}' is not in the -ng.<n> series"
+            exit 1
+          fi
+          if [ "$APPLY_PATCHES" != "true" ] && echo "$REQUESTED_TAG" | grep -q -- '-ng\.'; then
+            echo "::error::apply_patches=false but tag '${REQUESTED_TAG}' claims the -ng (patched) series"
+            exit 1
+          fi
+          echo "IMAGE_TAG=$REQUESTED_TAG" >> "$GITHUB_ENV"
+          echo "APPLY_PATCHES=$APPLY_PATCHES" >> "$GITHUB_ENV"
 
       - name: Checkout upstream source at ${{ env.UPSTREAM_REF_VALIDATED }}
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -191,6 +240,7 @@ jobs:
           path: upstream
 
       - name: Apply project patches
+        if: env.APPLY_PATCHES == 'true'
         shell: bash
         run: |
           set -euo pipefail
