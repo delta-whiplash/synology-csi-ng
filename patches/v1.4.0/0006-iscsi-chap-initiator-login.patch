@@ -1,0 +1,195 @@
+diff --git a/pkg/driver/initiator.go b/pkg/driver/initiator.go
+index 65669e9..1d9e084 100644
+--- a/pkg/driver/initiator.go
++++ b/pkg/driver/initiator.go
+@@ -31,9 +31,7 @@ import (
+ )
+ 
+ type initiatorDriver struct {
+-	chapUser     string
+-	chapPassword string
+-	tools        tools
++	tools tools
+ }
+ 
+ type iscsiSession struct {
+@@ -147,6 +145,26 @@ func (t *tools) iscsiadm_login(iqn, portal string) error {
+ 	return nil
+ }
+ 
++// iscsiadm_set_node_auth stores the CHAP credentials the initiator must
++// present when logging in to a target that demands CHAP (DSM target
++// auth_type=1). Without this the login is refused even though the target
++// exists — the target-side and initiator-side halves of CHAP are separate.
++func (t *tools) iscsiadm_set_node_auth(iqn, portal, chapUser, chapPass string) error {
++	cmd := t.iscsiadm(
++		"-m", "node",
++		"--targetname", iqn,
++		"--portal", portal,
++		"--op", "update",
++		"--name", "node.session.auth.authmethod", "--value", "CHAP",
++		"--name", "node.session.auth.username", "--value", chapUser,
++		"--name", "node.session.auth.password", "--value", chapPass)
++	out, err := cmd.CombinedOutput()
++	if err != nil {
++		return fmt.Errorf("%s (%v)", string(out), err)
++	}
++	return nil
++}
++
+ func (t *tools) iscsiadm_update_node_startup(iqn, portal string) error {
+ 	cmd := t.iscsiadm(
+ 		"-m", "node",
+@@ -242,7 +260,11 @@ func (t *tools) listSessionsByIqn(targetIqn string) (matchedSessions []iscsiSess
+ 	return matchedSessions
+ }
+ 
+-func (d *initiatorDriver) login(targetIqn string, portal string) error {
++// login logs the node in to the target. When chapUser and chapPass are both
++// set, the node record is configured for CHAP before the login attempt —
++// required by every target created with auth_type=1 (see webapi
++// TargetCreate). An empty pair keeps the upstream plain login unchanged.
++func (d *initiatorDriver) login(targetIqn string, portal string, chapUser string, chapPass string) error {
+ 	if d.tools.hasSession(targetIqn, portal) {
+ 		log.Infof("Session[%s] already exists.", targetIqn)
+ 		return nil
+@@ -253,6 +275,13 @@ func (d *initiatorDriver) login(targetIqn string, portal string) error {
+ 		return err
+ 	}
+ 
++	if chapUser != "" && chapPass != "" {
++		if err := d.tools.iscsiadm_set_node_auth(targetIqn, portal, chapUser, chapPass); err != nil {
++			log.Errorf("Failed to set CHAP auth for target [%s]: %v", targetIqn, err)
++			return err
++		}
++	}
++
+ 	if err := d.tools.iscsiadm_login(targetIqn, portal); err != nil {
+ 		log.Errorf("Failed in login of the target: %v", err)
+ 		return err
+diff --git a/pkg/driver/iscsi_chap_login_test.go b/pkg/driver/iscsi_chap_login_test.go
+new file mode 100644
+index 0000000..393c166
+--- /dev/null
++++ b/pkg/driver/iscsi_chap_login_test.go
+@@ -0,0 +1,79 @@
++// Copyright 2026 Synology Inc.
++
++package driver
++
++import (
++	"strings"
++	"testing"
++)
++
++// TestLoginConfiguresChapOnTheNodeRecord: a target created with auth_type=1
++// refuses a plain login. When CHAP credentials are configured for the DSM,
++// the node record must be updated with them before the login attempt — and
++// only then.
++func TestLoginConfiguresChapOnTheNodeRecord(t *testing.T) {
++	e := &recordingExecutor{} // no sessions: a fresh login
++	d := newTestInitiator(e)
++
++	if err := d.login(testIqn, testPortal, "k8s-worker", "some-pass"); err != nil {
++		t.Fatalf("unexpected error: %v", err)
++	}
++
++	authIdx := e.find("node.session.auth.authmethod")
++	if authIdx < 0 {
++		t.Fatalf("expected the node record to be configured for CHAP, ran: %v", e.ran)
++	}
++	for _, want := range []string{
++		"node.session.auth.authmethod --value CHAP",
++		"node.session.auth.username --value k8s-worker",
++		"node.session.auth.password --value some-pass",
++	} {
++		if !strings.Contains(e.ran[authIdx], want) {
++			t.Errorf("auth update %q is missing %q", e.ran[authIdx], want)
++		}
++	}
++	// CHAP must be configured after discovery (the record is created by it)
++	// and before the login attempt.
++	discIdx := e.find("--discover")
++	loginIdx := e.find("--login")
++	if discIdx < 0 || loginIdx < 0 {
++		t.Fatalf("expected discovery and login, ran: %v", e.ran)
++	}
++	if authIdx < discIdx || authIdx > loginIdx {
++		t.Errorf("auth update at %d must sit between discovery (%d) and login (%d), ran: %v",
++			authIdx, discIdx, loginIdx, e.ran)
++	}
++}
++
++// TestLoginWithoutChapKeepsThePlainLogin: no CHAP credentials means the
++// upstream login flow, untouched — no auth update at all.
++func TestLoginWithoutChapKeepsThePlainLogin(t *testing.T) {
++	e := &recordingExecutor{} // no sessions: a fresh login
++	d := newTestInitiator(e)
++
++	if err := d.login(testIqn, testPortal, "", ""); err != nil {
++		t.Fatalf("unexpected error: %v", err)
++	}
++
++	if idx := e.find("node.session.auth"); idx >= 0 {
++		t.Errorf("did not expect any auth update without CHAP credentials, ran: %v", e.ran)
++	}
++	if e.find("--login") < 0 {
++		t.Errorf("expected the plain login to still happen, ran: %v", e.ran)
++	}
++}
++
++// TestLoginFailsWhenChapCannotBeStored: a target that demands CHAP must not
++// be logged in to without the credentials — a failed auth update aborts the
++// login instead of attempting one that DSM would reject.
++func TestLoginFailsWhenChapCannotBeStored(t *testing.T) {
++	e := &recordingExecutor{fail: "node.session.auth"}
++	d := newTestInitiator(e)
++
++	if err := d.login(testIqn, testPortal, "k8s-worker", "some-pass"); err == nil {
++		t.Fatal("expected an error when the CHAP credentials cannot be stored")
++	}
++	if e.find("--login") >= 0 {
++		t.Errorf("did not expect a login attempt after a failed auth update, ran: %v", e.ran)
++	}
++}
+\ No newline at end of file
+diff --git a/pkg/driver/nodeserver.go b/pkg/driver/nodeserver.go
+index 2272d79..27e9a03 100644
+--- a/pkg/driver/nodeserver.go
++++ b/pkg/driver/nodeserver.go
+@@ -288,11 +288,19 @@ func (ns *nodeServer) loginTarget(volumeId string) (paths []string, iqn string,
+ 		return nil, "", 0, status.Errorf(codes.Internal, "Failed to get portals")
+ 	}
+ 
++	// CHAP credentials for this DSM (client-info iscsiuser/iscsipass), when
++	// configured: a target created with auth_type=1 refuses a plain login.
++	dsm, derr := ns.dsmService.GetDsm(k8sVolume.DsmIp)
++	if derr != nil {
++		return nil, "", 0, status.Errorf(codes.Internal,
++			"Failed to get DSM[%s] for CHAP credentials: %v", k8sVolume.DsmIp, derr)
++	}
++
+ 	// Assume target and lun 1-1 mapping
+ 	iqn = k8sVolume.Target.Iqn
+ 	lun = k8sVolume.Target.MappedLuns[0].MappingIndex
+ 	for _, portal := range portals {
+-		if err := ns.Initiator.login(iqn, portal); err != nil {
++		if err := ns.Initiator.login(iqn, portal, dsm.IscsiUser, dsm.IscsiPass); err != nil {
+ 			return nil, "", 0, status.Errorf(codes.Internal,
+ 				fmt.Sprintf("Failed to login with target iqn [%s], err: %v", iqn, err))
+ 		}
+diff --git a/pkg/driver/utils.go b/pkg/driver/utils.go
+index 90ee99c..6c3c0fd 100644
+--- a/pkg/driver/utils.go
++++ b/pkg/driver/utils.go
+@@ -72,9 +72,7 @@ func NewNodeServer(d *Driver) *nodeServer {
+ 			Exec:      exec.New(),
+ 		},
+ 		Initiator: &initiatorDriver{
+-			chapUser:     "",
+-			chapPassword: "",
+-			tools:        d.tools,
++			tools: d.tools,
+ 		},
+ 		Client: getK8sClient(),
+ 		tools:  d.tools,
