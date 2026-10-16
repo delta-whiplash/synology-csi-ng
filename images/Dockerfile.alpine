@@ -1,7 +1,12 @@
 # Builds the UNMODIFIED upstream synology-csi driver source with an Alpine
 # runtime — same tool set as the official v1.3.1 image (e2fsprogs, xfsprogs,
-# cifs-utils, nfs-utils, nvme-cli all available in Alpine repos), with
-# upstream v1.4.0's non-root default (USER 1000) preserved.
+# btrfs-progs, cifs-utils, nfs-utils, nvme-cli all available in Alpine repos),
+# with upstream v1.4.0's non-root default (USER 1000) preserved.
+#
+# btrfs-progs is not optional: mount-utils' resize path shells out to
+# `btrfs inspect-internal dump-super` for btrfs-formatted volumes
+# (pkg/driver/nodeserver.go NeedResize) and fails with codes.Internal when the
+# binary is missing, so do not drop it when trimming the image.
 #
 # Why not upstream's own v1.4.0 Dockerfile? It uses UBI9, whose free repos do
 # not carry e2fsprogs/xfsprogs/cifs-utils/nfs-utils — the build requires RHEL
