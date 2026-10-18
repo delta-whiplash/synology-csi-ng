@@ -109,6 +109,10 @@ spec:
               readOnly: true
             - name: kubelet-dir
               mountPath: {{ .Values.node.kubeletPath }}
+              # Obligatoire : sans Bidirectional, les mounts du driver restent
+              # dans son ns privé et les pods reçoivent le disque local du
+              # nœud (incident 2026-10-12→18, synology-csi-ng#17).
+              mountPropagation: Bidirectional
             - name: tmp
               mountPath: /tmp
           resources:
