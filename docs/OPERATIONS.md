@@ -317,3 +317,9 @@ kubectl -n synology-csi get vpa synology-csi-controller-vpa -o yaml | grep -A 10
 - **DSM unreachable**: check network, then DSM → Control Panel → Terminal & SNMP → Terminal → enable SSH, then SSH in and check `/var/log/messages` for NFS/iSCSI errors
 - **Driver pods CrashLoopBackOff**: check logs (`kubectl logs -n synology-csi -l app.kubernetes.io/name=synology-csi-ng,app.kubernetes.io/component=controller --tail=200`), then restart the pod
 - **Data loss suspected**: do NOT delete the PVC or PV. Follow `docs/DISASTER-RECOVERY.md` to snapshot/clone the LUN first, then investigate
+
+## Release driver : ordre des opérations (leçon du 18/10)
+
+1. Merger le patch sur main → dispatch `build-driver.yml` (tag série -ng.N finale ou -ng.N-rc.M pour l'itération).
+2. **Attendre le succès du job `publish`** (le workflow vérifie que l'image est pullable — c'est le signal).
+3. SEULEMENT ensuite : commit du bump `values.yaml` côté workload (sinon ArgoCD sync un tag inexistant → ImagePullBackOff, controller CSI down, vécu le 18/10 avec rc.2).
