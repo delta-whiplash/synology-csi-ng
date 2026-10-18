@@ -12,19 +12,79 @@ index 3ae74e3..59adfaa 100644
  	}
  
 diff --git a/pkg/driver/device_identity.go b/pkg/driver/device_identity.go
-index 23fd46f..89ea131 100644
+index 23fd46f..f32acdc 100644
 --- a/pkg/driver/device_identity.go
 +++ b/pkg/driver/device_identity.go
-@@ -11,8 +11,6 @@ import (
+@@ -5,21 +5,66 @@
+ package driver
+ 
+ import (
++	"errors"
+ 	"fmt"
+ 	"os"
+ 	"path/filepath"
  	"regexp"
  	"strconv"
  	"strings"
 -
 -	log "github.com/sirupsen/logrus"
++	"time"
  )
  
  // sysfsRoot is a var so tests can point the walk at a fabricated tree.
-@@ -38,16 +36,18 @@ var sessionRe = regexp.MustCompile(`(^|/)(session\d+)(/|$)`)
+ var sysfsRoot = "/sys"
+ 
++// devDir is the directory the session walk resolves block device nodes into.
++// Var so tests can point it at the same fabricated tree as sysfsRoot, where
++// the stand-in /dev/<name> nodes live.
++var devDir = "/dev"
++
++// sessionPollInterval spaces the re-reads of the sysfs walk while the kernel
++// scan of a freshly logged-in lun completes. Var so tests can shrink it.
++var sessionPollInterval = time.Second
++
++// waitForSessionDevice returns the block device the kernel attached to
++// (iqn, lun), resolved from sysfs. The kernel scans a freshly logged-in
++// session asynchronously, so the first read legitimately misses -- the walk
++// is retried on a bounded budget, like the by-path wait it mirrors. Only the
++// transient classifications are retried; an unreadable layout comes back at
++// once. Var so tests can stand the walk in.
++var waitForSessionDevice = func(iqn string, lun int, sysfs string) (string, error) {
++	deadline := time.Now().Add(20 * time.Second)
++	for {
++		dev, err := findSessionDevice(iqn, lun, sysfs)
++		if err == nil {
++			return dev, nil
++		}
++		if !errors.Is(err, ErrSessionNotFound) && !errors.Is(err, ErrLunNotFound) {
++			return "", err
++		}
++		if time.Now().After(deadline) {
++			return "", err
++		}
++		time.Sleep(sessionPollInterval)
++	}
++}
++
+ var sessionRe = regexp.MustCompile(`(^|/)(session\d+)(/|$)`)
+ 
++var targetRe = regexp.MustCompile(`^target\d+:\d+:\d+$`)
++
++// ErrSessionNotFound means no iSCSI session carries the wanted target iqn:
++// the login did not happen (or died) and has to be redone. Callers classify
++// findSessionDevice failures with errors.Is to decide between re-login
++// (this) and rescan (ErrLunNotFound).
++var ErrSessionNotFound = errors.New("iscsi session not found")
++
++// ErrLunNotFound means a session is logged in to the target but the lun has
++// no block device behind it (yet): only a scan is missing. See
++// ErrSessionNotFound for the classification contract.
++var ErrLunNotFound = errors.New("iscsi lun not found")
++
+ // verifyIscsiDevice checks that the device a by-path link resolved to really
+ // belongs to the target and LUN this volume expects.
+ //
+@@ -38,16 +83,18 @@ var sessionRe = regexp.MustCompile(`(^|/)(session\d+)(/|$)`)
  // the LUN number. Comparing those against what the volume expects decides,
  // per mount, whether by-path told the truth.
  //
@@ -51,7 +111,7 @@ index 23fd46f..89ea131 100644
  	}
  
  	names := []string{filepath.Base(real)}
-@@ -55,8 +55,11 @@ func verifyIscsiDevice(devPath, wantIqn string, wantLun int, sysfs string) error
+@@ -55,8 +102,11 @@ func verifyIscsiDevice(devPath, wantIqn string, wantLun int, sysfs string) error
  		// A multipath device is only as trustworthy as its legs.
  		slaves, err := os.ReadDir(filepath.Join(sysfs, "block", filepath.Base(real), "slaves"))
  		if err != nil {
@@ -65,7 +125,7 @@ index 23fd46f..89ea131 100644
  		}
  		names = names[:0]
  		for _, s := range slaves {
-@@ -67,13 +70,16 @@ func verifyIscsiDevice(devPath, wantIqn string, wantLun int, sysfs string) error
+@@ -67,39 +117,217 @@ func verifyIscsiDevice(devPath, wantIqn string, wantLun int, sysfs string) error
  	for _, name := range names {
  		canonical, err := filepath.EvalSymlinks(filepath.Join(sysfs, "block", name, "device"))
  		if err != nil {
@@ -85,16 +145,21 @@ index 23fd46f..89ea131 100644
  				"the by-path link for target[%s] points at something that never came from that target",
  				devPath, name, canonical, wantIqn)
  		}
-@@ -81,7 +87,7 @@ func verifyIscsiDevice(devPath, wantIqn string, wantLun int, sysfs string) error
+ 		session := m[2]
  
- 		hctl := filepath.Base(canonical)
- 		parts := strings.Split(hctl, ":")
+-		hctl := filepath.Base(canonical)
+-		parts := strings.Split(hctl, ":")
 -		var gotLun = -1
-+		gotLun := -1
- 		if len(parts) == 4 {
- 			if v, err := strconv.Atoi(parts[3]); err == nil {
- 				gotLun = v
-@@ -90,16 +96,51 @@ func verifyIscsiDevice(devPath, wantIqn string, wantLun int, sysfs string) error
+-		if len(parts) == 4 {
+-			if v, err := strconv.Atoi(parts[3]); err == nil {
+-				gotLun = v
+-			}
++		// An hctl that is not H:C:T:L carries no comparable lun: -1 skips
++		// the lun check instead of failing the identity.
++		gotLun, ok := lunOf(filepath.Base(canonical))
++		if !ok {
++			gotLun = -1
+ 		}
  
  		data, err := os.ReadFile(filepath.Join(sysfs, "class", "iscsi_session", session, "targetname"))
  		if err != nil {
@@ -149,11 +214,219 @@ index 23fd46f..89ea131 100644
 +	}
  	return nil
  }
++
++// findSessionDevice locates the whole block device the kernel attached to
++// (iqn, lun) by walking sysfs -- the kernel's own view, no udev involved.
++// This is the discovery counterpart of verifyIscsiDevice: on udev-less nodes
++// (Talos) nothing scans a freshly logged-in session, so no device node ever
++// appears and the by-path links never come into existence; the only record
++// of the login is sysfs itself.
++//
++// The walk follows the kernel's layout: /sys/class/iscsi_session/<session>/
++// holds one entry per logged-in session with the target IQN in targetname;
++// that class entry resolves into the devices tree, where the session's
++// device directory holds a targetX:Y:Z directory per portal, each holding a
++// H:C:T:L directory per LUN, and each LUN directory exposes its disk under
++// block/<name>. Returns /dev/<name> of the first block device found for
++// (iqn, lun).
++//
++// The two failures are distinct on purpose, and surfaced as sentinel errors
++// so callers classify with errors.Is instead of matching substrings:
++// ErrSessionNotFound means the login did not happen (or died) and has to be
++// redone; ErrLunNotFound means the login happened but the device is not
++// attached yet and only a scan is missing. Callers retry both, but for
++// different reasons.
++func findSessionDevice(iqn string, lun int, sysfs string) (string, error) {
++	classDir := filepath.Join(sysfs, "class", "iscsi_session")
++	sessions, err := os.ReadDir(classDir)
++	if err != nil {
++		return "", fmt.Errorf("couldn't list the iSCSI sessions under %s: %v", classDir, err)
++	}
++	var matched []string
++	for _, s := range sessions {
++		data, err := os.ReadFile(filepath.Join(classDir, s.Name(), "targetname"))
++		if err != nil {
++			// A session mid-login or mid-teardown may carry no targetname
++			// yet; it is not ours to judge, keep looking.
++			continue
++		}
++		if strings.TrimSpace(string(data)) == iqn {
++			matched = append(matched, s.Name())
++		}
++	}
++	if len(matched) == 0 {
++		return "", fmt.Errorf("%w for target[%s] under %s -- the login did not "+
++			"happen or is already gone", ErrSessionNotFound, iqn, classDir)
++	}
++
++	// One iqn is routinely logged in on several sessions -- one per portal,
++	// each with its own SCSI host -- and the kernel scans them
++	// independently: the lun can already be attached on another session
++	// while this one has not been scanned yet. Walk them all; only a walk
++	// that came up empty on every session gets to say the lun is absent.
++	for _, session := range matched {
++		dev, err := sessionDevice(session, iqn, lun, classDir)
++		if err == nil {
++			return dev, nil
++		}
++		if !errors.Is(err, ErrLunNotFound) {
++			// This session's sysfs cannot be read, which is not evidence
++			// that the lun is absent; report it instead of guessing.
++			return "", err
++		}
++	}
++	return "", fmt.Errorf("%w: none of the %d session(s) logged in to target[%s] "+
++		"carries a block device for lun %d -- the device is not attached (yet)",
++		ErrLunNotFound, len(matched), iqn, lun)
++}
++
++// sessionDevice walks one session's subtree -- class entry resolved into the
++// devices tree, then targetX:Y:Z, then H:C:T:L, then the lun's disk under
++// block/ -- and returns /dev/<name> of the first block device found, or an
++// ErrLunNotFound-wrapped error if this session does not carry the lun.
++func sessionDevice(session, iqn string, lun int, classDir string) (string, error) {
++	// The class entry is a symlink into the devices tree:
++	// .../<host>/<session>/iscsi_session/<session>. The session's device
++	// directory -- the one holding the targetX:Y:Z entries -- sits two
++	// levels up.
++	canonical, err := filepath.EvalSymlinks(filepath.Join(classDir, session))
++	if err != nil {
++		return "", fmt.Errorf("couldn't resolve the sysfs path of session %s (target[%s]): %v",
++			session, iqn, err)
++	}
++	// Assert the shape before deriving sessionDir by Dir(Dir(...)): a class
++	// entry that resolves anywhere else would send the walk into an
++	// invented parent and come back as a misleading "no device for lun",
++	// sending the caller rescanning a login that is fine.
++	sessionDir := filepath.Dir(filepath.Dir(canonical))
++	if filepath.Base(canonical) != session ||
++		filepath.Base(filepath.Dir(canonical)) != "iscsi_session" ||
++		filepath.Base(sessionDir) != session {
++		return "", fmt.Errorf("session %s resolves to %s, which is not the shape "+
++			".../<session>/iscsi_session/<session> -- unexpected sysfs layout, refusing to guess",
++			session, canonical)
++	}
++
++	targets, err := os.ReadDir(sessionDir)
++	if err != nil {
++		return "", fmt.Errorf("couldn't list the targets of session %s (target[%s]): %v",
++			session, iqn, err)
++	}
++	for _, tgt := range targets {
++		if !targetRe.MatchString(tgt.Name()) {
++			continue
++		}
++		lunDirs, err := os.ReadDir(filepath.Join(sessionDir, tgt.Name()))
++		if err != nil {
++			// Target mid-teardown; a live one will match elsewhere or the
++			// walk below reports the lun as missing.
++			continue
++		}
++		for _, h := range lunDirs {
++			gotLun, ok := lunOf(h.Name())
++			if !ok || gotLun != lun {
++				continue
++			}
++			blocks, err := os.ReadDir(filepath.Join(sessionDir, tgt.Name(), h.Name(), "block"))
++			if err != nil {
++				// The lun exists but carries no disk (yet): exactly the
++				// window this function exists for. Keep looking, report
++				// once the whole session has been walked.
++				continue
++			}
++			if len(blocks) > 0 {
++				// ReadDir sorts by name, so the pick is deterministic.
++				return filepath.Join(devDir, blocks[0].Name()), nil
++			}
++		}
++	}
++	return "", fmt.Errorf("%w: session %s carries no block device for lun %d",
++		ErrLunNotFound, session, lun)
++}
++
++// lunOf parses the trailing LUN out of an H:C:T:L sysfs directory name.
++func lunOf(hctl string) (int, bool) {
++	parts := strings.Split(hctl, ":")
++	if len(parts) != 4 {
++		return -1, false
++	}
++	v, err := strconv.Atoi(parts[3])
++	if err != nil {
++		return -1, false
++	}
++	return v, true
++}
 diff --git a/pkg/driver/device_identity_test.go b/pkg/driver/device_identity_test.go
-index be1136b..2d2ea86 100644
+index be1136b..54c68e2 100644
 --- a/pkg/driver/device_identity_test.go
 +++ b/pkg/driver/device_identity_test.go
-@@ -50,8 +50,10 @@ func fakeSysfs(t *testing.T, dev, session, hctl, iqn string) (sysfs, devPath str
+@@ -3,6 +3,7 @@
+ package driver
+ 
+ import (
++	"errors"
+ 	"os"
+ 	"path/filepath"
+ 	"strings"
+@@ -14,14 +15,16 @@ const (
+ 	wrongIqn = "iqn.2000-01.com.synology:nas.pvc-wrong"
+ )
+ 
+-// fakeSysfs builds the slice of sysfs the verifier walks: a block device whose
+-// canonical device path names an iSCSI session, and the session's targetname.
+-func fakeSysfs(t *testing.T, dev, session, hctl, iqn string) (sysfs, devPath string) {
++// fakeSession adds one logged-in session to a fake sysfs root, laid out the
++// way the kernel builds it: the session's device in the devices tree (under
++// its own SCSI host, holding targetX:Y:Z, the lun dir, and the lun's disk
++// under block/), the block device backed by it, and the class entry
++// symlinked to the session's iscsi_session directory.
++func fakeSession(t *testing.T, root, dev, session, host, target, hctl, iqn string) {
+ 	t.Helper()
+-	root := t.TempDir()
+ 
+-	canonical := filepath.Join(root, "devices", "platform", "host6", session, "target6:0:0", hctl)
+-	if err := os.MkdirAll(canonical, 0o755); err != nil {
++	canonical := filepath.Join(root, "devices", "platform", host, session, target, hctl)
++	if err := os.MkdirAll(filepath.Join(canonical, "block", dev), 0o755); err != nil {
+ 		t.Fatal(err)
+ 	}
+ 	blockDir := filepath.Join(root, "block", dev)
+@@ -32,13 +35,31 @@ func fakeSysfs(t *testing.T, dev, session, hctl, iqn string) (sysfs, devPath str
+ 		t.Fatal(err)
+ 	}
+ 
+-	sessDir := filepath.Join(root, "class", "iscsi_session", session)
+-	if err := os.MkdirAll(sessDir, 0o755); err != nil {
++	// The kernel hangs a session off its device in the devices tree and
++	// symlinks the class entry to it: /sys/class/iscsi_session/<session> ->
++	// .../<host>/<session>/iscsi_session/<session>.
++	inner := filepath.Join(root, "devices", "platform", host, session, "iscsi_session", session)
++	if err := os.MkdirAll(inner, 0o755); err != nil {
+ 		t.Fatal(err)
+ 	}
+-	if err := os.WriteFile(filepath.Join(sessDir, "targetname"), []byte(iqn+"\n"), 0o644); err != nil {
++	if err := os.WriteFile(filepath.Join(inner, "targetname"), []byte(iqn+"\n"), 0o644); err != nil {
+ 		t.Fatal(err)
+ 	}
++	classDir := filepath.Join(root, "class", "iscsi_session")
++	if err := os.MkdirAll(classDir, 0o755); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Symlink(inner, filepath.Join(classDir, session)); err != nil {
++		t.Fatal(err)
++	}
++}
++
++// fakeSysfs builds the slice of sysfs the verifier and the session walk
++// traverse, with one logged-in session.
++func fakeSysfs(t *testing.T, dev, session, hctl, iqn string) (sysfs, devPath string) {
++	t.Helper()
++	root := t.TempDir()
++	fakeSession(t, root, dev, session, "host6", "target6:0:0", hctl, iqn)
+ 
+ 	// A stand-in for /dev/<dev>: the verifier only needs its resolved basename.
+ 	devPath = filepath.Join(root, dev)
+@@ -50,8 +71,10 @@ func fakeSysfs(t *testing.T, dev, session, hctl, iqn string) (sysfs, devPath str
  
  func TestDeviceThatMatchesIsAccepted(t *testing.T) {
  	sysfs, dev := fakeSysfs(t, "sdx", "session7", "6:0:0:1", rightIqn)
@@ -165,7 +438,7 @@ index be1136b..2d2ea86 100644
  	}
  }
  
-@@ -60,7 +62,7 @@ func TestDeviceThatMatchesIsAccepted(t *testing.T) {
+@@ -60,7 +83,7 @@ func TestDeviceThatMatchesIsAccepted(t *testing.T) {
  // bytes with no error anywhere, so this must refuse.
  func TestDeviceFromAnotherTargetIsRefused(t *testing.T) {
  	sysfs, dev := fakeSysfs(t, "sdx", "session7", "6:0:0:1", wrongIqn)
@@ -174,7 +447,7 @@ index be1136b..2d2ea86 100644
  	if err == nil {
  		t.Fatal("a device belonging to another volume's target must be refused")
  	}
-@@ -73,7 +75,7 @@ func TestDeviceFromAnotherTargetIsRefused(t *testing.T) {
+@@ -73,7 +96,7 @@ func TestDeviceFromAnotherTargetIsRefused(t *testing.T) {
  
  func TestDeviceWithTheWrongLunIsRefused(t *testing.T) {
  	sysfs, dev := fakeSysfs(t, "sdx", "session7", "6:0:0:2", rightIqn)
@@ -183,7 +456,7 @@ index be1136b..2d2ea86 100644
  		t.Fatal("a device carrying a different LUN must be refused; " +
  			"logoutTarget already assumes one LUN per target, this is where that assumption gets checked")
  	}
-@@ -99,7 +101,7 @@ func TestNonIscsiDeviceIsRefused(t *testing.T) {
+@@ -99,7 +122,7 @@ func TestNonIscsiDeviceIsRefused(t *testing.T) {
  		t.Fatal(err)
  	}
  
@@ -192,7 +465,7 @@ index be1136b..2d2ea86 100644
  		t.Fatal("a local disk behind an iSCSI by-path link must be refused")
  	}
  }
-@@ -117,7 +119,7 @@ func TestMultipathSlavesAreVerified(t *testing.T) {
+@@ -117,7 +140,7 @@ func TestMultipathSlavesAreVerified(t *testing.T) {
  		t.Fatal(err)
  	}
  
@@ -201,7 +474,7 @@ index be1136b..2d2ea86 100644
  		t.Fatal("a multipath device whose leg belongs to another target must be refused")
  	}
  }
-@@ -125,13 +127,69 @@ func TestMultipathSlavesAreVerified(t *testing.T) {
+@@ -125,13 +148,160 @@ func TestMultipathSlavesAreVerified(t *testing.T) {
  // Not being able to tell is logged, not fatal: the identity was never shown to
  // be wrong, and failing every mount on an unfamiliar sysfs layout would trade
  // a rare corruption for a common outage.
@@ -252,6 +525,97 @@ index be1136b..2d2ea86 100644
 +	}
 +}
 +
++// findSessionDevice is the discovery half of the story: on udev-less nodes
++// (Talos) nothing scans a freshly logged-in session, so no device node ever
++// appears and the by-path links are never created. Discovery has to start
++// from the session itself and walk the kernel's sysfs view.
++func TestFindSessionDeviceFindsTheLun(t *testing.T) {
++	sysfs, _ := fakeSysfs(t, "sdx", "session7", "6:0:0:1", rightIqn)
++	got, err := findSessionDevice(rightIqn, 1, sysfs)
++	if err != nil {
++		t.Fatalf("the session and the lun are both present, they must be found: %v", err)
++	}
++	if want := "/dev/sdx"; got != want {
++		t.Errorf("the device must come back as /dev/<name>, got %q want %q", got, want)
++	}
++}
++
++// One iqn is logged in on several sessions under real multipath -- one per
++// portal, each with its own SCSI host -- and the kernel scans them
++// independently. If the first session has not got the lun while the second
++// has, the walk must still find it: declaring the lun absent off the first
++// session is a false negative the caller would answer with a re-login.
++func TestFindSessionDeviceWalksEverySessionOfTheIqn(t *testing.T) {
++	root := t.TempDir()
++	// session7 (host6): right iqn, but only lun 2 attached so far.
++	fakeSession(t, root, "sdx", "session7", "host6", "target6:0:0", "6:0:0:2", rightIqn)
++	// session8 (host7): same iqn through the second portal, lun 1 attached.
++	fakeSession(t, root, "sdy", "session8", "host7", "target7:0:0", "7:0:0:1", rightIqn)
++
++	got, err := findSessionDevice(rightIqn, 1, root)
++	if err != nil {
++		t.Fatalf("the lun is attached on the second session, it must be found: %v", err)
++	}
++	if want := "/dev/sdy"; got != want {
++		t.Errorf("the device from the second session must be returned, got %q want %q", got, want)
++	}
++}
++
++// No session carries the iqn: the login did not happen or is already gone.
++// The caller (publish self-heal) classifies this as "needs a re-login", so
++// the error must carry the ErrSessionNotFound sentinel, not a substring to
++// match against.
++func TestFindSessionDeviceWithoutSessionIsAnError(t *testing.T) {
++	sysfs, _ := fakeSysfs(t, "sdx", "session7", "6:0:0:1", wrongIqn)
++	_, err := findSessionDevice(rightIqn, 1, sysfs)
++	if !errors.Is(err, ErrSessionNotFound) {
++		t.Fatalf("a missing session must classify as ErrSessionNotFound, got: %v", err)
++	}
++	if !strings.Contains(err.Error(), rightIqn) {
++		t.Errorf("the error should name the target no session serves, missing %q in: %v", rightIqn, err)
++	}
++}
++
++// The session is logged in but the lun has no block device behind it yet --
++// exactly the window between login and scan that self-healing has to ride
++// out. Must classify as ErrLunNotFound (rescan, not re-login) and carry the
++// lun it did not find.
++func TestFindSessionDeviceWithoutLunIsAnError(t *testing.T) {
++	sysfs, _ := fakeSysfs(t, "sdx", "session7", "6:0:0:2", rightIqn)
++	_, err := findSessionDevice(rightIqn, 1, sysfs)
++	if !errors.Is(err, ErrLunNotFound) {
++		t.Fatalf("a session without the lun must classify as ErrLunNotFound, got: %v", err)
++	}
++	if !strings.Contains(err.Error(), "lun 1") {
++		t.Errorf("the error should carry the lun that was not found, missing %q in: %v", "lun 1", err)
++	}
++}
++
++// A class entry that does not resolve to .../<session>/iscsi_session/<session>
++// in the devices tree is a sysfs shape the walk cannot read. It must report
++// itself as such: falling through to "no device for lun" would send the
++// caller rescanning a login that is fine.
++func TestFindSessionDeviceWithUnfamiliarLayoutNamesTheLayout(t *testing.T) {
++	root := t.TempDir()
++	// Flat class layout (real dir, no devices tree behind it): not a shape
++	// the walk reads.
++	sessDir := filepath.Join(root, "class", "iscsi_session", "session7")
++	if err := os.MkdirAll(sessDir, 0o755); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(sessDir, "targetname"), []byte(rightIqn+"\n"), 0o644); err != nil {
++		t.Fatal(err)
++	}
++
++	_, err := findSessionDevice(rightIqn, 1, root)
++	if err == nil {
++		t.Fatal("an unreadable sysfs layout must be an error")
++	}
++	if errors.Is(err, ErrLunNotFound) || errors.Is(err, ErrSessionNotFound) {
++		t.Errorf("the error must name the layout, not disguise itself as a missing login or lun: %v", err)
++	}
++}
++
 +// A dm device whose legs are gone reports no slaves: zero evidence, zero
 +// trust -- this must be refused, not passed like an empty check.
 +func TestDmDeviceWithNoSlavesIsRefused(t *testing.T) {
@@ -290,10 +654,28 @@ index 7b48f92..e6dfe44 100644
  
  type identityServer struct {
 diff --git a/pkg/driver/initiator.go b/pkg/driver/initiator.go
-index 65669e9..c307451 100644
+index 65669e9..ae344e4 100644
 --- a/pkg/driver/initiator.go
 +++ b/pkg/driver/initiator.go
-@@ -162,6 +162,18 @@ func (t *tools) iscsiadm_update_node_startup(iqn, portal string) error {
+@@ -30,6 +30,17 @@ import (
+ 	utilexec "k8s.io/utils/exec"
+ )
+ 
++// initiator is the slice of the iSCSI initiator the node server consumes:
++// login to (re-)establish a session when staging or self-healing a publish,
++// logout and rescan for teardown and expand. Typed as an interface so tests
++// can stand the initiator in and observe which logins ran without touching a
++// host.
++type initiator interface {
++	login(targetIqn string, portal string) error
++	logout(targetIqn string, ip string) error
++	rescan(targetIqn string) error
++}
++
+ type initiatorDriver struct {
+ 	chapUser     string
+ 	chapPassword string
+@@ -162,6 +173,18 @@ func (t *tools) iscsiadm_update_node_startup(iqn, portal string) error {
  	return nil
  }
  
@@ -369,7 +751,7 @@ index 723ed77..4ab7113 100644
  	}
  
 diff --git a/pkg/driver/nodeserver.go b/pkg/driver/nodeserver.go
-index 2272d79..1344909 100644
+index 2272d79..417be93 100644
 --- a/pkg/driver/nodeserver.go
 +++ b/pkg/driver/nodeserver.go
 @@ -18,6 +18,7 @@ package driver
@@ -380,7 +762,42 @@ index 2272d79..1344909 100644
  	"fmt"
  	"os"
  	"path"
-@@ -293,8 +294,27 @@ func (ns *nodeServer) loginTarget(volumeId string) (paths []string, iqn string,
+@@ -46,12 +47,16 @@ type nodeServer struct {
+ 	Driver     *Driver
+ 	Mounter    *mount.SafeFormatAndMount
+ 	dsmService interfaces.IDsmService
+-	Initiator  *initiatorDriver
++	Initiator  initiator
+ 	Client     clientset.Interface
+ 	tools      tools
+ }
+ 
+-func waitForDevicePathToExist(path string) error {
++// waitForDevicePathToExist polls for a device node to show up after a login
++// or a rescan. Var so tests can short-circuit the 20-second wait: a fake node
++// has no /dev/disk at all, and the self-heal tests simulate the udev-less
++// shape where the link never appears.
++var waitForDevicePathToExist = func(path string) error {
+ 	ticker := time.NewTicker(1 * time.Second)
+ 	defer ticker.Stop()
+ 	timer := time.NewTimer(20 * time.Second)
+@@ -274,13 +279,9 @@ func (ns *nodeServer) logoutNVMeSubsystem(nqn string) {
+ // device links, along with the target IQN and LUN number they are supposed to
+ // stand for -- the caller is expected to verify that before trusting them.
+ func (ns *nodeServer) loginTarget(volumeId string) (paths []string, iqn string, lun int, err error) {
+-	k8sVolume, err := ns.dsmService.GetVolume(volumeId)
++	k8sVolume, err := ns.lookupIscsiVolume(volumeId)
+ 	if err != nil {
+-		return nil, "", 0, status.Errorf(codes.Unavailable,
+-			"Couldn't determine whether volume[%s] exists: %v", volumeId, err)
+-	}
+-	if k8sVolume == nil {
+-		return nil, "", 0, status.Error(codes.NotFound, fmt.Sprintf("Volume[%s] is not found", volumeId))
++		return nil, "", 0, err
+ 	}
+ 
+ 	portals := ns.getPortals(k8sVolume.DsmIp)
+@@ -293,16 +294,42 @@ func (ns *nodeServer) loginTarget(volumeId string) (paths []string, iqn string,
  	lun = k8sVolume.Target.MappedLuns[0].MappingIndex
  	for _, portal := range portals {
  		if err := ns.Initiator.login(iqn, portal); err != nil {
@@ -396,8 +813,12 @@ index 2272d79..1344909 100644
 +				return nil, "", 0, status.Errorf(codes.Internal,
 +					fmt.Sprintf("Failed to login with target iqn [%s], err: %v", iqn, err))
 +			}
-+		}
-+
+ 		}
+ 
+-		path := fmt.Sprintf("%sip-%s-iscsi-%s-lun-%d", "/dev/disk/by-path/", portal, iqn, lun)
+-		if err := waitForDevicePathToExist(path); err != nil {
+-			log.Errorf("Can't find device path [%s]: %v", path, err)
+-			return nil, "", 0, status.Errorf(codes.Internal, fmt.Sprintf("Can't find device path [%s]: %v", path, err))
 +		// Without udev (Talos) nothing scans a freshly logged-in session: the
 +		// device nodes only appear after an explicit rescan (same step as
 +		// csi-lib-iscsi's Connect). Rescan every session of this target.
@@ -409,20 +830,150 @@ index 2272d79..1344909 100644
 +			}
  		}
  
- 		path := fmt.Sprintf("%sip-%s-iscsi-%s-lun-%d", "/dev/disk/by-path/", portal, iqn, lun)
-@@ -596,7 +616,10 @@ func (ns *nodeServer) nodeStageISCSIVolume(ctx context.Context, spec *models.Nod
- 		return nil, status.Error(codes.Internal, "Can't get volume mount path")
++		path := fmt.Sprintf("%sip-%s-iscsi-%s-lun-%d", "/dev/disk/by-path/", portal, iqn, lun)
++		// The sysfs session answers as soon as the kernel has attached the
++		// lun, while the by-path links wait for udev -- and never come at all
++		// on udev-less nodes (Talos). Probe sysfs first: when it already sees
++		// the lun, the by-path wait is dead time. The link is appended either
++		// way -- its leg count drives the multipath decision and it remains
++		// the stage's by-path fallback.
++		if _, findErr := findSessionDevice(iqn, lun, sysfsRoot); findErr != nil {
++			if err := waitForDevicePathToExist(path); err != nil {
++				log.Warnf("Can't find device path [%s]: %v", path, err)
++				continue
++			}
++		}
+ 		paths = append(paths, path)
+ 	}
+ 
+@@ -586,44 +613,93 @@ func (ns *nodeServer) nodeStageISCSIVolume(ctx context.Context, spec *models.Nod
+ 		return &csi.NodeStageVolumeResponse{}, nil
+ 	}
+ 
+-	iscsiDevPaths, iqn, lun, err := ns.loginTarget(spec.VolumeId)
+-	if err != nil {
++	if err := ns.stageIscsiAt(spec.StagingTargetPath, spec.VolumeId, spec.VolumeCapability.GetMount(), utils.StringToSlice(spec.FormatOptions)); err != nil {
+ 		return nil, status.Error(codes.Internal, err.Error())
+ 	}
+ 
+-	volumeMountPath := getVolumeMountPath(iscsiDevPaths)
+-	if volumeMountPath == "" {
+-		return nil, status.Error(codes.Internal, "Can't get volume mount path")
++	return &csi.NodeStageVolumeResponse{}, nil
++}
++
++// resolveStageDevice picks the block device a stage mounts. Several by-path
++// legs mean multipath: the device to mount is the dm map spanning the legs --
++// the sysfs walk only ever sees one leg and would silently drop the
++// redundancy -- so getVolumeMountPath decides and there is no single-leg
++// fallback. Mono-path, the sysfs session walk leads (udev-less nodes never
++// grow by-path links) and by-path stays as the fallback.
++func resolveStageDevice(iscsiDevPaths []string, iqn string, lun int) (string, error) {
++	if len(iscsiDevPaths) > 1 {
++		volumeMountPath := getVolumeMountPath(iscsiDevPaths)
++		if volumeMountPath == "" {
++			return "", fmt.Errorf("can't resolve the multipath device of target[%s] lun %d -- refusing to mount a single leg", iqn, lun)
++		}
++		return volumeMountPath, nil
  	}
  
 -	if err := verifyIscsiDevice(volumeMountPath, iqn, lun, sysfsRoot); err != nil {
+-		return nil, status.Error(codes.Internal, err.Error())
++	volumeMountPath, err := waitForSessionDevice(iqn, lun, sysfsRoot)
++	if err != nil {
++		log.Warnf("sysfs discovery of target[%s] lun %d failed (%v), falling back to the by-path links", iqn, lun, err)
++		volumeMountPath = getVolumeMountPath(iscsiDevPaths)
++		if volumeMountPath == "" {
++			return "", fmt.Errorf("can't resolve the block device of target[%s] lun %d: %v", iqn, lun, err)
++		}
+ 	}
++	return volumeMountPath, nil
++}
+ 
+-	notMount, err := ns.Mounter.Interface.IsLikelyNotMountPoint(spec.StagingTargetPath)
++// stageIscsiAt logs the volume's LUN in and mounts it at stagingTargetPath --
++// the whole staging sequence, shared by NodeStageVolume and by the publish
++// self-heal, which rebuilds a staging path whose "staged" state the kubelet
++// has skipped over. Errors come back bare; callers wrap the ones they want in
++// a gRPC status.
++func (ns *nodeServer) stageIscsiAt(stagingTargetPath, volumeId string, mountVolume *csi.VolumeCapability_MountVolume, formatOptions []string) error {
++	iscsiDevPaths, iqn, lun, err := ns.loginTarget(volumeId)
+ 	if err != nil {
+-		return nil, status.Error(codes.Internal, err.Error())
++		return err
+ 	}
+ 
+-	if !notMount {
+-		return &csi.NodeStageVolumeResponse{}, nil
++	volumeMountPath, err := resolveStageDevice(iscsiDevPaths, iqn, lun)
++	if err != nil {
++		return err
+ 	}
+ 
+-	fsType := spec.VolumeCapability.GetMount().GetFsType()
+-	options := append([]string{"rw"}, spec.VolumeCapability.GetMount().GetMountFlags()...)
+-	options = withXfsMountOptions(fsType, options)
 +	// Mount the resolved device, not the link: a by-path link repointed after
 +	// the verification would otherwise still be followed by mount(2).
 +	volumeMountPath, err = verifyIscsiDevice(volumeMountPath, iqn, lun, sysfsRoot)
 +	if err != nil {
- 		return nil, status.Error(codes.Internal, err.Error())
++		return err
++	}
+ 
+-	formatOptions := utils.StringToSlice(spec.FormatOptions)
++	// The device just proved to be this volume's LUN: record it next to the
++	// staging path -- the publish compares the marker against what DSM says
++	// the volume is, since "an iSCSI disk" alone is not "THIS volume's disk".
++	// Written before the mount-point check on purpose: a staging found
++	// already mounted still gets its freshly verified identity.
++	if err := writeIscsiIdentityMarker(stagingTargetPath, iqn, lun, volumeId); err != nil {
++		return err
++	}
+ 
+-	if err = ns.Mounter.FormatAndMountSensitiveWithFormatOptions(volumeMountPath, spec.StagingTargetPath, fsType, options, nil, formatOptions); err != nil {
+-		return nil, status.Error(codes.Internal, err.Error())
++	notMount, err := ns.Mounter.Interface.IsLikelyNotMountPoint(stagingTargetPath)
++	if err != nil {
++		return err
  	}
  
-@@ -950,6 +973,38 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
+-	if err := ns.growFilesystemIfNeeded(volumeMountPath, spec.StagingTargetPath); err != nil {
+-		return nil, status.Error(codes.Internal, err.Error())
++	if !notMount {
++		return nil // already staged
+ 	}
+ 
+-	return &csi.NodeStageVolumeResponse{}, nil
++	fsType := mountVolume.GetFsType()
++	options := append([]string{"rw"}, mountVolume.GetMountFlags()...)
++	options = withXfsMountOptions(fsType, options)
++
++	// formatOptions are the stage's mkfs options; the publish self-heal
++	// passes none -- a NodePublishVolumeRequest carries no format options,
++	// and a staging being rebuilt is formatted with the defaults (in
++	// practice the LUN already carries a filesystem).
++	if err := ns.Mounter.FormatAndMountSensitiveWithFormatOptions(volumeMountPath, stagingTargetPath, fsType, options, nil, formatOptions); err != nil {
++		return err
++	}
++
++	return ns.growFilesystemIfNeeded(volumeMountPath, stagingTargetPath)
+ }
+ 
+ func (ns *nodeServer) nodeStageSMBVolume(ctx context.Context, spec *models.NodeStageVolumeSpec, secrets map[string]string) (*csi.NodeStageVolumeResponse, error) {
+@@ -798,6 +874,12 @@ func (ns *nodeServer) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstag
+ 		}
+ 	}
+ 
++	// The identity marker lives outside the mount; drop it once the staging
++	// is down so a later re-use of the path cannot inherit a stale identity.
++	if err := os.Remove(stagingTargetPath + identityMarkerSuffix); err != nil && !os.IsNotExist(err) {
++		return nil, status.Error(codes.Internal, err.Error())
++	}
++
+ 	k8sVolume, err := ns.dsmService.GetVolume(volumeId)
+ 	if err != nil {
+ 		// Claiming the volume is unstaged could leave an iSCSI session logged
+@@ -950,6 +1032,51 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
  			return nil, status.Error(codes.Internal, err.Error())
  		}
  	default:
@@ -433,24 +984,37 @@ index 2272d79..1344909 100644
 +		// the node's own partition. Only raw-block volumes skip staging and
 +		// need a device path here.
 +		if !isBlock {
-+			if mounted, err := isStillMounted(ns.Mounter.Interface, stagingTargetPath); err != nil {
++			mounted, err := isStillMounted(ns.Mounter.Interface, stagingTargetPath)
++			if err != nil {
 +				return nil, status.Error(codes.Internal, err.Error())
-+			} else if !mounted {
-+				// Bind-staging contract: publishing over an unstaged directory
-+				// would give the pod a silently empty filesystem.
-+				return nil, status.Error(codes.FailedPrecondition,
-+					"staging target is not mounted: stage must complete before publish")
 +			}
-+			// The kubelet can skip staging when its cached state says "already
-+			// staged", leaving whatever the staging path held at reconstruction
-+			// time -- observed in production as a pod living on the node's own
-+			// partition. Verify the backing device is an iSCSI whole disk.
-+			if dev, ok := stagingMountSource(stagingTargetPath); !ok || dev == "" {
-+				return nil, status.Error(codes.FailedPrecondition,
-+					"staging target has no backing device in the mount table")
-+			} else if err := requireIscsiDisk(dev, sysfsRoot); err != nil {
-+				return nil, status.Errorf(codes.FailedPrecondition,
-+					"staging target is not backed by a verified iSCSI disk: %v", err)
++			// What the staging must hold: the identity DSM assigns to THIS
++			// volume. requireIscsiDisk alone proves "an iSCSI disk" -- the
++			// marker proves "the LUN this volume was staged from" (prod
++			// 2026-10-17: a pod was handed a staging carrying another disk).
++			// When the staging does not provably hold it, rebuild it instead
++			// of refusing: the refusal wedged pods forever, the kubelet never
++			// re-stages on its own.
++			k8sVolume, err := ns.lookupIscsiVolume(volumeId)
++			if err != nil {
++				return nil, err
++			}
++			expectedIqn := k8sVolume.Target.Iqn
++			expectedLun := k8sVolume.Target.MappedLuns[0].MappingIndex
++			trusted := mounted && stagingBackedByIscsiDisk(stagingTargetPath) &&
++				stagingIdentityMatches(stagingTargetPath, expectedIqn, expectedLun, volumeId)
++			if !trusted {
++				log.Warnf("NodePublishVolume: staging %s does not provably hold target[%s] lun %d (mounted: %v), self-healing it",
++					stagingTargetPath, expectedIqn, expectedLun, mounted)
++				if err := ns.selfHealIscsiStaging(stagingTargetPath, volumeId, mounted, req.GetVolumeCapability().GetMount()); err != nil {
++					return nil, status.Errorf(codes.FailedPrecondition,
++						"staging target does not provably hold this volume's LUN and healing it failed: %v", err)
++				}
++				if !stagingBackedByIscsiDisk(stagingTargetPath) ||
++					!stagingIdentityMatches(stagingTargetPath, expectedIqn, expectedLun, volumeId) {
++					return nil, status.Error(codes.FailedPrecondition,
++						"staging target still does not provably hold this volume's LUN after the self-heal")
++				}
 +			}
 +			if err := ns.Mounter.Interface.Mount(stagingTargetPath, targetPath, fsType, options); err != nil {
 +				return nil, status.Error(codes.Internal, err.Error())
@@ -461,7 +1025,7 @@ index 2272d79..1344909 100644
  		iscsiDevPaths, iqn, lun, err := ns.loginTarget(volumeId)
  		if err != nil {
  			return nil, status.Error(codes.Internal, err.Error())
-@@ -960,16 +1015,13 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
+@@ -960,16 +1087,13 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
  			return nil, status.Error(codes.Internal, "Can't get volume mount path")
  		}
  
@@ -482,10 +1046,97 @@ index 2272d79..1344909 100644
  			return nil, status.Error(codes.Internal, err.Error())
  		}
  	}
-@@ -977,6 +1029,50 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
+@@ -977,6 +1101,137 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
  	return &csi.NodePublishVolumeResponse{}, nil
  }
  
++// stagingBackedByIscsiDisk reports whether the staging path carries a live
++// mount whose backing device proves to be an iSCSI whole disk. Any doubt --
++// unmounted, no mount-table entry, unverifiable device -- is a no.
++func stagingBackedByIscsiDisk(stagingTargetPath string) bool {
++	dev, ok := stagingMountSource(stagingTargetPath)
++	if !ok || dev == "" {
++		return false
++	}
++	return requireIscsiDisk(dev, sysfsRoot) == nil
++}
++
++// selfHealIscsiStaging rebuilds a staging path that does not hold the volume's
++// LUN: peel every mount layer off it (the same bounded peel as
++// NodeUnpublishVolume), then re-run the whole staging sequence against the
++// volume -- login included, existing sessions are reused by the initiator.
++// The caller re-verifies the rebuilt staging's backing before binding
++// anything, so a rebuild that ends up wrong still fails the publish.
++func (ns *nodeServer) selfHealIscsiStaging(stagingTargetPath, volumeId string, mounted bool, mountVolume *csi.VolumeCapability_MountVolume) error {
++	if mounted {
++		for i := 0; i < maxUnmountPeels; i++ {
++			still, err := isStillMounted(ns.Mounter.Interface, stagingTargetPath)
++			if err != nil {
++				return fmt.Errorf("couldn't check whether %s is mounted: %v", stagingTargetPath, err)
++			}
++			if !still {
++				break
++			}
++			if err := ns.Mounter.Interface.Unmount(stagingTargetPath); err != nil {
++				return fmt.Errorf("failed to unmount the stale staging %s: %v", stagingTargetPath, err)
++			}
++		}
++		if still, err := isStillMounted(ns.Mounter.Interface, stagingTargetPath); err != nil {
++			return fmt.Errorf("couldn't check whether %s is mounted: %v", stagingTargetPath, err)
++		} else if still {
++			return fmt.Errorf("%s is still mounted after %d unmount attempts", stagingTargetPath, maxUnmountPeels)
++		}
++	}
++	// The kubelet guarantees the staging directory only on the stage path it
++	// just skipped; a self-heal makes no such assumption.
++	if err := os.MkdirAll(stagingTargetPath, 0o750); err != nil {
++		return fmt.Errorf("failed to create the staging directory %s: %v", stagingTargetPath, err)
++	}
++	return ns.stageIscsiAt(stagingTargetPath, volumeId, mountVolume, nil)
++}
++
++// identityMarkerSuffix names the file recording, next to a staging path, the
++// LUN identity the stage verified for it. A sibling of the staging directory,
++// not a file inside it: the staging mount shadows its own directory's
++// content, and the publish must read the marker while the staging is
++// mounted.
++const identityMarkerSuffix = ".identity"
++
++// writeIscsiIdentityMarker records the verified identity of a staging:
++// target IQN, LUN index and the volume they belong to.
++func writeIscsiIdentityMarker(stagingTargetPath, iqn string, lun int, volumeId string) error {
++	content := fmt.Sprintf("iqn=%s\nlun=%d\nvolumeId=%s\n", iqn, lun, volumeId)
++	if err := os.WriteFile(stagingTargetPath+identityMarkerSuffix, []byte(content), 0o600); err != nil {
++		return fmt.Errorf("failed to record the identity of staging %s: %v", stagingTargetPath, err)
++	}
++	return nil
++}
++
++// stagingIdentityMatches reports whether the marker next to the staging path
++// names exactly the expected volume identity. A missing, stale or foreign
++// marker means the staging is not provably this volume's.
++func stagingIdentityMatches(stagingTargetPath, iqn string, lun int, volumeId string) bool {
++	data, err := os.ReadFile(stagingTargetPath + identityMarkerSuffix)
++	if err != nil {
++		return false
++	}
++	return string(data) == fmt.Sprintf("iqn=%s\nlun=%d\nvolumeId=%s\n", iqn, lun, volumeId)
++}
++
++// lookupIscsiVolume resolves the identity DSM assigns to a volume -- the
++// target IQN and mapped LUN a staging of this volume has to prove.
++func (ns *nodeServer) lookupIscsiVolume(volumeId string) (*models.K8sVolumeRespSpec, error) {
++	k8sVolume, err := ns.dsmService.GetVolume(volumeId)
++	if err != nil {
++		return nil, status.Errorf(codes.Unavailable,
++			"Couldn't determine whether volume[%s] exists: %v", volumeId, err)
++	}
++	if k8sVolume == nil {
++		return nil, status.Error(codes.NotFound, fmt.Sprintf("Volume[%s] is not found", volumeId))
++	}
++	return k8sVolume, nil
++}
++
 +// isStillMounted reports whether path carries a live mount right now. The
 +// "likely" fast check cannot see bind mounts of plain directories, so the
 +// authoritative /proc/mounts table decides. Var so tests can point it at a
@@ -533,7 +1184,7 @@ index 2272d79..1344909 100644
  func (ns *nodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublishVolumeRequest) (*csi.NodeUnpublishVolumeResponse, error) {
  	if req.GetVolumeId() == "" { // Not needed, but still a mandatory field
  		return nil, status.Error(codes.InvalidArgument, "Volume ID missing in request")
-@@ -991,25 +1087,42 @@ func (ns *nodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpu
+@@ -991,25 +1246,42 @@ func (ns *nodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpu
  		if os.IsNotExist(err) {
  			return &csi.NodeUnpublishVolumeResponse{}, nil
  		}
@@ -591,10 +1242,10 @@ index 2272d79..1344909 100644
  	return &csi.NodeUnpublishVolumeResponse{}, nil
 diff --git a/pkg/driver/nodeserver_iscsi_test.go b/pkg/driver/nodeserver_iscsi_test.go
 new file mode 100644
-index 0000000..1c21245
+index 0000000..ffc6f42
 --- /dev/null
 +++ b/pkg/driver/nodeserver_iscsi_test.go
-@@ -0,0 +1,319 @@
+@@ -0,0 +1,779 @@
 +/*
 + * Copyright 2025 Synology Inc.
 + */
@@ -604,13 +1255,17 @@ index 0000000..1c21245
 +import (
 +	"context"
 +	"errors"
++	"fmt"
 +	"os"
 +	"path/filepath"
++	"strings"
 +	"testing"
++	"time"
 +
 +	"github.com/container-storage-interface/spec/lib/go/csi"
 +	"k8s.io/mount-utils"
 +
++	"github.com/SynologyOpenSource/synology-csi/pkg/dsm/webapi"
 +	"github.com/SynologyOpenSource/synology-csi/pkg/interfaces"
 +	"github.com/SynologyOpenSource/synology-csi/pkg/models"
 +	"github.com/SynologyOpenSource/synology-csi/pkg/utils"
@@ -640,51 +1295,49 @@ index 0000000..1c21245
 +	}
 +}
 +
-+// NodePublishVolume must bind the staging path for filesystem volumes and
-+// never re-login or re-resolve devices: after a node migration the second
-+// device resolution races /dev/disk/by-* creation (no udev on Talos) and has
-+// been observed handing a pod the node's local partition.
-+func TestPublishBindsStagingWithoutTouchingDsm(t *testing.T) {
++// A staging mounted from a proper iSCSI disk but carrying NO identity marker
++// (written by the pre-marker driver, say) cannot be proven to be this
++// volume's. The publish self-heals it -- unmount, re-stage, re-verify -- and
++// binds only the rebuilt staging: upgrading the driver must not wedge pods.
++func TestPublishSelfHealsAStagingWithoutIdentityMarker(t *testing.T) {
 +	withFakeMountDetection(t)
-+	// un staging backing device qui passe requireIscsiDisk (faux sysfs)
-+	sysfs, iscsiDev := fakeSysfs(t, "sdx", "session7", "6:0:0:1", rightIqn)
-+	oldSys := sysfsRoot
-+	sysfsRoot = sysfs
-+	t.Cleanup(func() { sysfsRoot = oldSys })
-+	origSrc := stagingMountSource
-+	stagingMountSource = func(path string) (string, bool) {
-+		if path == filepath.Join(t.TempDir(), "never") {
-+			return "", false
-+		}
-+		return iscsiDev, true
-+	}
-+	t.Cleanup(func() { stagingMountSource = origSrc })
++	withAbsentByPath(t)
++	_, iscsiDev := withFakeSysfs(t, pvcIqn)
++
 +	base := t.TempDir()
-+	staging := filepath.Join(base, "staging")
-+	target := filepath.Join(base, "target")
++	staging, target := filepath.Join(base, "staging"), filepath.Join(base, "target")
 +	for _, d := range []string{staging, target} {
 +		if err := os.MkdirAll(d, 0o750); err != nil {
 +			t.Fatal(err)
 +		}
 +	}
 +
-+	fm := mount.NewFakeMounter([]mount.MountPoint{{Device: "/dev/sdb", Path: staging}}) // staged LUN
-+
-+	ns := &nodeServer{
-+		Mounter:    &mount.SafeFormatAndMount{Interface: fm},
-+		dsmService: failingDsm{},
++	// mounted from the right LUN device, but the marker is missing
++	fm := mount.NewFakeMounter([]mount.MountPoint{{Device: iscsiDev, Path: staging}})
++	origSrc := stagingMountSource
++	stagingMountSource = func(path string) (string, bool) {
++		if path == staging {
++			return iscsiDev, true
++		}
++		return "", false
 +	}
++	t.Cleanup(func() { stagingMountSource = origSrc })
 +
-+	if _, err := ns.NodePublishVolume(context.Background(), iscsiMountPublishRequest(staging, target)); err != nil {
-+		t.Fatalf("filesystem publish must bind staging without DSM/iSCSI access, got: %v", err)
-+	}
-+
-+	for _, mp := range fm.MountPoints {
-+		if mp.Path == target && utils.SliceContains(mp.Opts, "bind") {
-+			return // the bind from staging happened
++	initr := &fakeInitiator{}
++	initr.stage = func() {
++		if err := fm.Mount(iscsiDev, staging, "xfs", []string{"rw"}); err != nil {
++			t.Errorf("fake stage mount failed: %v", err)
 +		}
 +	}
-+	t.Fatalf("publish did not bind staging %s onto %s; mounted: %v", staging, target, fm.MountPoints)
++
++	ns := selfHealNode(fm, initr)
++	if _, err := ns.NodePublishVolume(context.Background(), iscsiMountPublishRequest(staging, target)); err != nil {
++		t.Fatalf("publish must rebuild a staging without an identity marker, got: %v", err)
++	}
++	if _, err := os.Stat(staging + ".identity"); err != nil {
++		t.Fatalf("the rebuilt staging must carry an identity marker: %v", err)
++	}
++	assertBind(t, fm, staging, target)
 +}
 +
 +// A successful Unmount peels exactly one layer of a stacked bind. Publishing
@@ -912,6 +1565,464 @@ index 0000000..1c21245
 +
 +	if _, err := ns.NodePublishVolume(context.Background(), iscsiMountPublishRequest(staging, target)); err == nil {
 +		t.Fatal("publish must refuse a staging mount backed by a non-iSCSI device")
++	}
++}
++
++const pvcIqn = "iqn.2000-01.com.synology:test.pvc-1"
++
++// liveDsm answers the two lookups the self-heal needs: the volume's iSCSI
++// target identity and the DSM record behind its portal. Rebuilding a staging
++// re-resolves the volume through DSM -- unlike the fast path, which must
++// never call DSM at all (failingDsm pins that).
++type liveDsm struct {
++	interfaces.IDsmService
++}
++
++func (liveDsm) GetVolume(string) (*models.K8sVolumeRespSpec, error) {
++	return &models.K8sVolumeRespSpec{
++		VolumeId: "8029e1d2-8ea8-4e8a-ae5f-e4b9404885fa",
++		DsmIp:    "10.10.146.6",
++		Target: webapi.TargetInfo{
++			Iqn:        pvcIqn,
++			MappedLuns: []webapi.MappedLun{{LunUuid: "lun-pvc-1", MappingIndex: 1}},
++		},
++	}, nil
++}
++
++func (liveDsm) GetDsm(string) (*webapi.DSM, error) {
++	return &webapi.DSM{}, nil
++}
++
++// fakeInitiator stands in for the host's iSCSI initiator: it counts logins
++// (the fast path must make none) and can fail them (AC4) or, on success, lay
++// the staged mount into the fake mount table -- a stand-in for the real
++// FormatAndMount that follows a login in production, folded into the login
++// because that is the step whose success makes a stage possible.
++type fakeInitiator struct {
++	logins   int
++	loginErr error
++	// stage, when set, runs inside a successful login: that is where the test
++	// simulates the mount the real stage would perform.
++	stage func()
++}
++
++func (f *fakeInitiator) login(iqn, portal string) error {
++	f.logins++
++	if f.loginErr != nil {
++		return f.loginErr
++	}
++	if f.stage != nil {
++		f.stage()
++	}
++	return nil
++}
++
++func (f *fakeInitiator) logout(string, string) error { return nil }
++func (f *fakeInitiator) rescan(string) error         { return nil }
++
++// withAbsentByPath points the by-path wait at a node with no /dev/disk at
++// all -- the udev-less Talos shape the self-heal exists for: the login and
++// the rescan succeed, udev never builds the links. Without this seam every
++// self-heal test would wait out the real 20-second poll.
++func withAbsentByPath(t *testing.T) {
++	t.Helper()
++	orig := waitForDevicePathToExist
++	waitForDevicePathToExist = func(string) error {
++		return errors.New("no /dev/disk/by-path on this fake node")
++	}
++	t.Cleanup(func() { waitForDevicePathToExist = orig })
++}
++
++// withFakeSysfs points sysfsRoot and devDir at a fabricated sysfs holding one
++// logged-in iSCSI session for iqn (lun 1): the discovery walk reads the
++// session there and resolves the /dev/<name> node inside the same tree, the
++// way kernel sysfs and /dev agree on a real node. Returns the fake device
++// path the walk hands out.
++func withFakeSysfs(t *testing.T, iqn string) (sysfs, dev string) {
++	t.Helper()
++	sysfs, dev = fakeSysfs(t, "sdx", "session7", "6:0:0:1", iqn)
++	oldSys, oldDev := sysfsRoot, devDir
++	sysfsRoot, devDir = sysfs, sysfs
++	t.Cleanup(func() { sysfsRoot, devDir = oldSys, oldDev })
++	return sysfs, dev
++}
++
++// selfHealNode wires a node server for the self-heal tests: a DSM that
++// answers, a counting initiator, and a host executor reporting no iscsiadm
++// sessions (nothing to rescan after the fake login).
++func selfHealNode(fm *mount.FakeMounter, initr *fakeInitiator) *nodeServer {
++	return &nodeServer{
++		Mounter:    &mount.SafeFormatAndMount{Interface: fm},
++		dsmService: liveDsm{},
++		Initiator:  initr,
++		tools:      tools{executor: &recordingExecutor{}},
++	}
++}
++
++// assertBind checks that the publish bound the staging path onto the target.
++func assertBind(t *testing.T, fm *mount.FakeMounter, staging, target string) {
++	t.Helper()
++	for _, mp := range fm.MountPoints {
++		if mp.Path == target && utils.SliceContains(mp.Opts, "bind") {
++			return
++		}
++	}
++	t.Fatalf("publish did not bind staging %s onto %s; mounted: %v", staging, target, fm.MountPoints)
++}
++
++// AC1: the kubelet's cached state said "staged" but the staging path holds no
++// mount at all (node rebuilt under it). Publish used to refuse with
++// FailedPrecondition and the pod stayed wedged forever; it must now resolve
++// the volume through DSM, log the target in, stage the LUN at the staging
++// path and bind it -- all of it through the sysfs walk, since this node has
++// no by-path links.
++func TestPublishSelfHealsAnUnstagedStaging(t *testing.T) {
++	withFakeMountDetection(t)
++	withAbsentByPath(t)
++	_, iscsiDev := withFakeSysfs(t, pvcIqn)
++
++	base := t.TempDir()
++	staging, target := filepath.Join(base, "staging"), filepath.Join(base, "target")
++	for _, d := range []string{staging, target} {
++		if err := os.MkdirAll(d, 0o750); err != nil {
++			t.Fatal(err)
++		}
++	}
++
++	fm := mount.NewFakeMounter(nil)
++	initr := &fakeInitiator{}
++	// the login succeeding is what makes a stage possible: from that point on
++	// the staging path carries the LUN, and the mount table says so.
++	staged := false
++	initr.stage = func() {
++		staged = true
++		if err := fm.Mount(iscsiDev, staging, "xfs", []string{"rw"}); err != nil {
++			t.Errorf("fake stage mount failed: %v", err)
++		}
++	}
++	origSrc := stagingMountSource
++	stagingMountSource = func(path string) (string, bool) {
++		if path != staging {
++			return "", false
++		}
++		if staged {
++			return iscsiDev, true
++		}
++		return "/dev/sda4", true
++	}
++	t.Cleanup(func() { stagingMountSource = origSrc })
++
++	if _, err := selfHealNode(fm, initr).NodePublishVolume(context.Background(), iscsiMountPublishRequest(staging, target)); err != nil {
++		t.Fatalf("publish must self-heal an unstaged staging, got: %v", err)
++	}
++	assertBind(t, fm, staging, target)
++}
++
++// AC2: the kubelet believed the volume staged, but the staging path is
++// mounted from the node's own partition (the 2026-10-17 incident). Publish
++// must tear that mount down, re-run the full stage against the volume's LUN,
++// re-verify what the staging now holds and only then bind.
++func TestPublishSelfHealsAStagingBackedByAnotherDisk(t *testing.T) {
++	withFakeMountDetection(t)
++	withAbsentByPath(t)
++	_, iscsiDev := withFakeSysfs(t, pvcIqn)
++
++	base := t.TempDir()
++	staging, target := filepath.Join(base, "staging"), filepath.Join(base, "target")
++	for _, d := range []string{staging, target} {
++		if err := os.MkdirAll(d, 0o750); err != nil {
++			t.Fatal(err)
++		}
++	}
++
++	// the staging IS mounted -- by the node's local partition
++	fm := mount.NewFakeMounter([]mount.MountPoint{{Device: "/dev/sda4", Path: staging}})
++	initr := &fakeInitiator{}
++	staged := false
++	initr.stage = func() {
++		staged = true
++		if err := fm.Mount(iscsiDev, staging, "xfs", []string{"rw"}); err != nil {
++			t.Errorf("fake stage mount failed: %v", err)
++		}
++	}
++	origSrc := stagingMountSource
++	stagingMountSource = func(path string) (string, bool) {
++		if path != staging {
++			return "", false
++		}
++		if staged {
++			return iscsiDev, true
++		}
++		return "/dev/sda4", true
++	}
++	t.Cleanup(func() { stagingMountSource = origSrc })
++
++	if _, err := selfHealNode(fm, initr).NodePublishVolume(context.Background(), iscsiMountPublishRequest(staging, target)); err != nil {
++		t.Fatalf("publish must replace a staging backed by another disk, got: %v", err)
++	}
++
++	// the final stack: the LUN mounted at staging (the rebuilt stage) and the
++	// bind of staging onto the target, with no trace of the partition.
++	bound, restaged := false, false
++	for _, mp := range fm.MountPoints {
++		if mp.Path == target && utils.SliceContains(mp.Opts, "bind") {
++			bound = true
++		}
++		if mp.Path == staging && mp.Device == iscsiDev {
++			restaged = true
++		}
++		if mp.Device == "/dev/sda4" {
++			t.Fatalf("the stale partition mount must be gone, final stack: %v", fm.MountPoints)
++		}
++	}
++	if !bound || !restaged {
++		t.Fatalf("expected the LUN re-staged at %s and bound onto %s; mounted: %v", staging, target, fm.MountPoints)
++	}
++}
++
++// AC3: the staging path provably holds this volume's LUN -- mounted, backed
++// by a verified iSCSI disk, identity marker matching. Binding must be the
++// whole story: one DSM read for the expected identity, zero iSCSI logins.
++func TestPublishBindsAVerifiedStagingWithoutAnyLogin(t *testing.T) {
++	withFakeMountDetection(t)
++	_, iscsiDev := withFakeSysfs(t, pvcIqn)
++
++	base := t.TempDir()
++	staging, target := filepath.Join(base, "staging"), filepath.Join(base, "target")
++	for _, d := range []string{staging, target} {
++		if err := os.MkdirAll(d, 0o750); err != nil {
++			t.Fatal(err)
++		}
++	}
++
++	fm := mount.NewFakeMounter([]mount.MountPoint{{Device: iscsiDev, Path: staging}})
++	// the stage left a matching identity marker next to the staging path
++	if err := os.WriteFile(staging+".identity", fakeMarker(pvcIqn, 1, "8029e1d2-8ea8-4e8a-ae5f-e4b9404885fa"), 0o600); err != nil {
++		t.Fatal(err)
++	}
++	origSrc := stagingMountSource
++	stagingMountSource = func(path string) (string, bool) {
++		if path == staging {
++			return iscsiDev, true
++		}
++		return "", false
++	}
++	t.Cleanup(func() { stagingMountSource = origSrc })
++
++	initr := &fakeInitiator{}
++	ns := &nodeServer{
++		Mounter:    &mount.SafeFormatAndMount{Interface: fm},
++		dsmService: liveDsm{}, // identity lookup: a read, never an iSCSI login
++		Initiator:  initr,
++	}
++	if _, err := ns.NodePublishVolume(context.Background(), iscsiMountPublishRequest(staging, target)); err != nil {
++		t.Fatalf("publish must bind a verified staging as-is, got: %v", err)
++	}
++	if initr.logins != 0 {
++		t.Fatalf("the fast path must not log in, got %d login(s)", initr.logins)
++	}
++	assertBind(t, fm, staging, target)
++}
++
++// AC4: the self-heal needs a login and the login fails (portal down). The
++// publish must surface the failure and bind nothing -- but it must have
++// TRIED the login, which is what separates this from the old refusal.
++func TestPublishReportsAFailedSelfHealLoginAndBindsNothing(t *testing.T) {
++	withFakeMountDetection(t)
++	withFakeSysfs(t, pvcIqn)
++
++	base := t.TempDir()
++	staging, target := filepath.Join(base, "staging"), filepath.Join(base, "target")
++	for _, d := range []string{staging, target} {
++		if err := os.MkdirAll(d, 0o750); err != nil {
++			t.Fatal(err)
++		}
++	}
++
++	fm := mount.NewFakeMounter(nil)
++	initr := &fakeInitiator{loginErr: errors.New("login failed: portal unreachable")}
++
++	if _, err := selfHealNode(fm, initr).NodePublishVolume(context.Background(), iscsiMountPublishRequest(staging, target)); err == nil {
++		t.Fatal("publish must report a self-heal whose login fails")
++	}
++	if initr.logins == 0 {
++		t.Fatal("the self-heal must have attempted the login before giving up")
++	}
++	for _, mp := range fm.MountPoints {
++		if mp.Path == target {
++			t.Fatalf("nothing may be bound onto the target on a failed self-heal: %v", fm.MountPoints)
++		}
++	}
++}
++
++// The kernel scans a freshly logged-in session asynchronously: the first
++// sysfs read after a login legitimately misses the lun. The stage must ride
++// that window out with a bounded poll -- failing the first read makes every
++// kubelet retry pay the whole login again.
++func TestPublishSelfHealToleratesALateKernelScan(t *testing.T) {
++	withFakeMountDetection(t)
++	withAbsentByPath(t)
++	sysfs, iscsiDev := withFakeSysfs(t, pvcIqn)
++	// logged in but not scanned: the lun carries no disk yet
++	canonical, err := filepath.EvalSymlinks(filepath.Join(sysfs, "block", "sdx", "device"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	blockDir := filepath.Join(canonical, "block")
++	if err := os.RemoveAll(blockDir); err != nil {
++		t.Fatal(err)
++	}
++	origInterval := sessionPollInterval
++	sessionPollInterval = 10 * time.Millisecond
++	t.Cleanup(func() { sessionPollInterval = origInterval })
++
++	base := t.TempDir()
++	staging, target := filepath.Join(base, "staging"), filepath.Join(base, "target")
++	for _, d := range []string{staging, target} {
++		if err := os.MkdirAll(d, 0o750); err != nil {
++			t.Fatal(err)
++		}
++	}
++
++	fm := mount.NewFakeMounter(nil)
++	initr := &fakeInitiator{}
++	staged := false
++	initr.stage = func() {
++		staged = true
++		// the scan completes a few polls after the login
++		time.AfterFunc(3*sessionPollInterval, func() {
++			_ = os.MkdirAll(filepath.Join(blockDir, "sdx"), 0o755)
++		})
++		if err := fm.Mount(iscsiDev, staging, "xfs", []string{"rw"}); err != nil {
++			t.Errorf("fake stage mount failed: %v", err)
++		}
++	}
++	origSrc := stagingMountSource
++	stagingMountSource = func(path string) (string, bool) {
++		if path != staging {
++			return "", false
++		}
++		if staged {
++			return iscsiDev, true
++		}
++		return "", false
++	}
++	t.Cleanup(func() { stagingMountSource = origSrc })
++
++	if _, err := selfHealNode(fm, initr).NodePublishVolume(context.Background(), iscsiMountPublishRequest(staging, target)); err != nil {
++		t.Fatalf("publish must ride out the asynchronous scan, got: %v", err)
++	}
++	assertBind(t, fm, staging, target)
++}
++
++// When the sysfs session already carries the lun, the by-path wait is dead
++// time -- infinite on udev-less nodes. loginTarget must probe sysfs first,
++// and keep the by-path in its leg list either way: the leg count drives the
++// multipath decision and the path stays the stage's fallback.
++func TestLoginTargetKeepsTheByPathWhenSysfsAnswers(t *testing.T) {
++	withAbsentByPath(t) // the wait, if reached, fails instantly
++	withFakeSysfs(t, pvcIqn)
++	ns := &nodeServer{
++		dsmService: liveDsm{},
++		Initiator:  &fakeInitiator{},
++		tools:      tools{executor: &recordingExecutor{}},
++	}
++	paths, iqn, lun, err := ns.loginTarget("8029e1d2-8ea8-4e8a-ae5f-e4b9404885fa")
++	if err != nil {
++		t.Fatalf("loginTarget must succeed when sysfs already answers, got: %v", err)
++	}
++	if iqn != pvcIqn || lun != 1 {
++		t.Fatalf("expected target[%s] lun 1, got %q/%d", pvcIqn, iqn, lun)
++	}
++	if len(paths) != 1 || !strings.Contains(paths[0], "/dev/disk/by-path/") {
++		t.Fatalf("the by-path link must stay in the leg list (multipath counting, stage fallback), got: %v", paths)
++	}
++}
++
++// Several by-path legs mean multipath: the stage must mount the dm map that
++// spans the legs -- the sysfs walk only ever sees one leg and would silently
++// drop the redundancy. When the map cannot be resolved, the stage fails; it
++// must never quietly mount a single leg instead.
++func TestResolveStageDeviceRefusesASingleLegWhenMultipathIsExpected(t *testing.T) {
++	withFakeSysfs(t, pvcIqn) // a leg IS resolvable from sysfs -- and must not be used
++	if _, err := resolveStageDevice(
++		[]string{
++			"/dev/disk/by-path/ip-10.10.146.6:3260-iscsi-iqn.2000-01.com.synology:test.pvc-1-lun-1",
++			"/dev/disk/by-path/ip-10.10.146.7:3260-iscsi-iqn.2000-01.com.synology:test.pvc-1-lun-1",
++		},
++		pvcIqn, 1); err == nil {
++		t.Fatal("an unresolvable multipath map must fail the stage, not fall back to a single leg")
++	}
++}
++
++// Mono-path keeps the sysfs walk as the primary source: udev-less nodes have
++// no by-path links at all.
++func TestResolveStageDeviceWalksSysfsOnMonoPath(t *testing.T) {
++	_, dev := withFakeSysfs(t, pvcIqn) // under the seam, devDir is the fake tree
++	got, err := resolveStageDevice(nil, pvcIqn, 1)
++	if err != nil {
++		t.Fatalf("the sysfs walk must resolve the mono-path device, got: %v", err)
++	}
++	if got != dev {
++		t.Errorf("expected the walked device %s, got %q", dev, got)
++	}
++}
++
++// fakeMarker renders the identity marker the way the stage writes it next to
++// a staging path -- fixture for a staging that already carries one.
++func fakeMarker(iqn string, lun int, volumeId string) []byte {
++	return []byte(fmt.Sprintf("iqn=%s\nlun=%d\nvolumeId=%s\n", iqn, lun, volumeId))
++}
++
++// A staging whose identity marker names ANOTHER volume is exactly the
++// corruption incident #17 produced: the device behind it is a real iSCSI
++// disk, so "is an iSCSI disk" alone would bind it. The publish must try to
++// rebuild -- and when the right LUN is nowhere to be found, refuse for good.
++func TestPublishRefusesAStagingMarkedForAnotherVolume(t *testing.T) {
++	withFakeMountDetection(t)
++	withAbsentByPath(t)
++	_, iscsiDev := withFakeSysfs(t, wrongIqn) // the session in sysfs is NOT this volume's
++	// no re-stage possible: the scan never brings this volume's lun
++	origWait := waitForSessionDevice
++	waitForSessionDevice = func(string, int, string) (string, error) {
++		return "", errors.New("no scan in this test")
++	}
++	t.Cleanup(func() { waitForSessionDevice = origWait })
++
++	base := t.TempDir()
++	staging, target := filepath.Join(base, "staging"), filepath.Join(base, "target")
++	for _, d := range []string{staging, target} {
++		if err := os.MkdirAll(d, 0o750); err != nil {
++			t.Fatal(err)
++		}
++	}
++	// staged for ANOTHER volume: the marker says so
++	if err := os.WriteFile(staging+".identity", fakeMarker(wrongIqn, 1, "another-volume"), 0o600); err != nil {
++		t.Fatal(err)
++	}
++
++	fm := mount.NewFakeMounter([]mount.MountPoint{{Device: iscsiDev, Path: staging}})
++	origSrc := stagingMountSource
++	stagingMountSource = func(path string) (string, bool) {
++		if path == staging {
++			return iscsiDev, true
++		}
++		return "", false
++	}
++	t.Cleanup(func() { stagingMountSource = origSrc })
++
++	initr := &fakeInitiator{}
++	ns := selfHealNode(fm, initr)
++	if _, err := ns.NodePublishVolume(context.Background(), iscsiMountPublishRequest(staging, target)); err == nil {
++		t.Fatal("publish must refuse a staging whose identity marker names another volume")
++	}
++	if initr.logins == 0 {
++		t.Fatal("publish must try to rebuild the staging, not refuse it untouched")
++	}
++	for _, mp := range fm.MountPoints {
++		if mp.Path == target {
++			t.Fatalf("nothing may be bound onto the target: %v", fm.MountPoints)
++		}
 +	}
 +}
 diff --git a/pkg/driver/nvme_connector.go b/pkg/driver/nvme_connector.go
