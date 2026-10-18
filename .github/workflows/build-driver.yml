@@ -87,8 +87,11 @@ jobs:
             echo "::error::tag '${REQUESTED_TAG}' has no series suffix; expected <upstream_ref>-ng.<n> (patched) or <upstream_ref>-stock.<n> (unmodified)"
             exit 1
           fi
-          if [ "$APPLY_PATCHES" = "true" ] && ! echo "$REQUESTED_TAG" | grep -qE -- '-ng\.[0-9]+$'; then
-            echo "::error::apply_patches=true but tag '${REQUESTED_TAG}' is not in the -ng.<n> series"
+          # -rc.<n> belongs to the series it extends (v1.4.0-ng.7-rc.1): RC
+          # builds are iteration artifacts for on-cluster validation and are
+          # expected to be superseded (or deleted) by the final -ng.<n>.
+          if [ "$APPLY_PATCHES" = "true" ] && ! echo "$REQUESTED_TAG" | grep -qE -- '-ng\.[0-9]+(-rc\.[0-9]+)?$'; then
+            echo "::error::apply_patches=true but tag '${REQUESTED_TAG}' is not in the -ng.<n> series (an -ng.<n>-rc.<n> suffix is allowed for iteration builds)"
             exit 1
           fi
           if [ "$APPLY_PATCHES" != "true" ] && echo "$REQUESTED_TAG" | grep -q -- '-ng\.'; then
@@ -229,8 +232,11 @@ jobs:
             echo "::error::tag '${REQUESTED_TAG}' has no series suffix; expected <upstream_ref>-ng.<n> (patched) or <upstream_ref>-stock.<n> (unmodified)"
             exit 1
           fi
-          if [ "$APPLY_PATCHES" = "true" ] && ! echo "$REQUESTED_TAG" | grep -qE -- '-ng\.[0-9]+$'; then
-            echo "::error::apply_patches=true but tag '${REQUESTED_TAG}' is not in the -ng.<n> series"
+          # -rc.<n> belongs to the series it extends (v1.4.0-ng.7-rc.1): RC
+          # builds are iteration artifacts for on-cluster validation and are
+          # expected to be superseded (or deleted) by the final -ng.<n>.
+          if [ "$APPLY_PATCHES" = "true" ] && ! echo "$REQUESTED_TAG" | grep -qE -- '-ng\.[0-9]+(-rc\.[0-9]+)?$'; then
+            echo "::error::apply_patches=true but tag '${REQUESTED_TAG}' is not in the -ng.<n> series (an -ng.<n>-rc.<n> suffix is allowed for iteration builds)"
             exit 1
           fi
           if [ "$APPLY_PATCHES" != "true" ] && echo "$REQUESTED_TAG" | grep -q -- '-ng\.'; then
