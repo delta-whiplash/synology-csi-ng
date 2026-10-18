@@ -312,10 +312,18 @@ index 723ed77..4ab7113 100644
  	}
  
 diff --git a/pkg/driver/nodeserver.go b/pkg/driver/nodeserver.go
-index 2272d79..e3b25ba 100644
+index 2272d79..e97bc18 100644
 --- a/pkg/driver/nodeserver.go
 +++ b/pkg/driver/nodeserver.go
-@@ -596,7 +596,10 @@ func (ns *nodeServer) nodeStageISCSIVolume(ctx context.Context, spec *models.Nod
+@@ -18,6 +18,7 @@ package driver
+ 
+ import (
+ 	"context"
++	"errors"
+ 	"fmt"
+ 	"os"
+ 	"path"
+@@ -596,7 +597,10 @@ func (ns *nodeServer) nodeStageISCSIVolume(ctx context.Context, spec *models.Nod
  		return nil, status.Error(codes.Internal, "Can't get volume mount path")
  	}
  
@@ -327,7 +335,7 @@ index 2272d79..e3b25ba 100644
  		return nil, status.Error(codes.Internal, err.Error())
  	}
  
-@@ -950,6 +953,27 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
+@@ -950,6 +954,27 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
  			return nil, status.Error(codes.Internal, err.Error())
  		}
  	default:
@@ -355,7 +363,7 @@ index 2272d79..e3b25ba 100644
  		iscsiDevPaths, iqn, lun, err := ns.loginTarget(volumeId)
  		if err != nil {
  			return nil, status.Error(codes.Internal, err.Error())
-@@ -960,16 +984,13 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
+@@ -960,16 +985,13 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
  			return nil, status.Error(codes.Internal, "Can't get volume mount path")
  		}
  
@@ -376,7 +384,7 @@ index 2272d79..e3b25ba 100644
  			return nil, status.Error(codes.Internal, err.Error())
  		}
  	}
-@@ -977,6 +998,32 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
+@@ -977,6 +999,32 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
  	return &csi.NodePublishVolumeResponse{}, nil
  }
  
@@ -409,7 +417,7 @@ index 2272d79..e3b25ba 100644
  func (ns *nodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublishVolumeRequest) (*csi.NodeUnpublishVolumeResponse, error) {
  	if req.GetVolumeId() == "" { // Not needed, but still a mandatory field
  		return nil, status.Error(codes.InvalidArgument, "Volume ID missing in request")
-@@ -991,25 +1038,35 @@ func (ns *nodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpu
+@@ -991,25 +1039,42 @@ func (ns *nodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpu
  		if os.IsNotExist(err) {
  			return &csi.NodeUnpublishVolumeResponse{}, nil
  		}
@@ -454,16 +462,23 @@ index 2272d79..e3b25ba 100644
 -	if err := os.Remove(targetPath); err != nil {
 -		return nil, status.Errorf(codes.Internal, "Failed to remove target path.")
 +	if err := os.Remove(targetPath); err != nil && !os.IsNotExist(err) {
++		if errors.Is(err, unix.ENOTEMPTY) || errors.Is(err, unix.EEXIST) {
++			// The mount is verifiably gone; whatever sits in the directory is
++			// leftover content for the kubelet's pod-dir GC, not a reason to
++			// wedge this pod's deletion forever.
++			log.Infof("NodeUnpublishVolume: %s still has leftover content, leaving it to kubelet GC", targetPath)
++			return &csi.NodeUnpublishVolumeResponse{}, nil
++		}
 +		return nil, status.Errorf(codes.Internal, "Failed to remove target path: %v", err)
  	}
  
  	return &csi.NodeUnpublishVolumeResponse{}, nil
 diff --git a/pkg/driver/nodeserver_iscsi_test.go b/pkg/driver/nodeserver_iscsi_test.go
 new file mode 100644
-index 0000000..dc5a02f
+index 0000000..07603ba
 --- /dev/null
 +++ b/pkg/driver/nodeserver_iscsi_test.go
-@@ -0,0 +1,249 @@
+@@ -0,0 +1,271 @@
 +/*
 + * Copyright 2025 Synology Inc.
 + */
@@ -711,6 +726,28 @@ index 0000000..dc5a02f
 +	}
 +	if calls != maxUnmountPeels+1 { // attempts + the final verification
 +		t.Fatalf("expected %d seam reads (%d attempts + final check), got %d", maxUnmountPeels+1, maxUnmountPeels, calls)
++	}
++}
++
++// The mount is verifiably gone but the target directory carries leftover
++// content (a bad earlier state can leave a whole filesystem's worth of files
++// in it): removing that content is the kubelet's pod-dir GC business, not this
++// RPC's. ENOTEMPTY must not turn into a wedged pod.
++func TestUnpublishToleratesLeftoverDirectoryContent(t *testing.T) {
++	target := filepath.Join(t.TempDir(), "mount")
++	if err := os.MkdirAll(filepath.Join(target, "data"), 0o750); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(target, "flock.lock"), nil, 0o600); err != nil {
++		t.Fatal(err)
++	}
++	// no fake mount layer: the mount is already gone, only the files remain
++	ns := &nodeServer{Mounter: &mount.SafeFormatAndMount{Interface: mount.NewFakeMounter(nil)}}
++	if _, err := ns.NodeUnpublishVolume(context.Background(), &csi.NodeUnpublishVolumeRequest{
++		VolumeId:   "8029e1d2-8ea8-4e8a-ae5f-e4b9404885fa",
++		TargetPath: target,
++	}); err != nil {
++		t.Fatalf("unpublish must succeed once the mount is verified gone, got: %v", err)
 +	}
 +}
 diff --git a/pkg/driver/nvme_connector.go b/pkg/driver/nvme_connector.go
