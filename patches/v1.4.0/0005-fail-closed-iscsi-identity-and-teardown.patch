@@ -751,10 +751,10 @@ index 723ed77..4ab7113 100644
  	}
  
 diff --git a/pkg/driver/nodeserver.go b/pkg/driver/nodeserver.go
-index 2272d79..417be93 100644
+index 2272d79..1aeadf3 100644
 --- a/pkg/driver/nodeserver.go
 +++ b/pkg/driver/nodeserver.go
-@@ -18,6 +18,7 @@ package driver
+@@ -18,10 +18,12 @@ package driver
  
  import (
  	"context"
@@ -762,7 +762,12 @@ index 2272d79..417be93 100644
  	"fmt"
  	"os"
  	"path"
-@@ -46,12 +47,16 @@ type nodeServer struct {
+ 	"path/filepath"
++	"sort"
+ 	"strconv"
+ 	"strings"
+ 	"time"
+@@ -46,12 +48,16 @@ type nodeServer struct {
  	Driver     *Driver
  	Mounter    *mount.SafeFormatAndMount
  	dsmService interfaces.IDsmService
@@ -781,7 +786,7 @@ index 2272d79..417be93 100644
  	ticker := time.NewTicker(1 * time.Second)
  	defer ticker.Stop()
  	timer := time.NewTimer(20 * time.Second)
-@@ -274,13 +279,9 @@ func (ns *nodeServer) logoutNVMeSubsystem(nqn string) {
+@@ -274,13 +280,9 @@ func (ns *nodeServer) logoutNVMeSubsystem(nqn string) {
  // device links, along with the target IQN and LUN number they are supposed to
  // stand for -- the caller is expected to verify that before trusting them.
  func (ns *nodeServer) loginTarget(volumeId string) (paths []string, iqn string, lun int, err error) {
@@ -797,7 +802,7 @@ index 2272d79..417be93 100644
  	}
  
  	portals := ns.getPortals(k8sVolume.DsmIp)
-@@ -293,16 +294,42 @@ func (ns *nodeServer) loginTarget(volumeId string) (paths []string, iqn string,
+@@ -293,16 +295,42 @@ func (ns *nodeServer) loginTarget(volumeId string) (paths []string, iqn string,
  	lun = k8sVolume.Target.MappedLuns[0].MappingIndex
  	for _, portal := range portals {
  		if err := ns.Initiator.login(iqn, portal); err != nil {
@@ -846,7 +851,7 @@ index 2272d79..417be93 100644
  		paths = append(paths, path)
  	}
  
-@@ -586,44 +613,93 @@ func (ns *nodeServer) nodeStageISCSIVolume(ctx context.Context, spec *models.Nod
+@@ -586,44 +614,93 @@ func (ns *nodeServer) nodeStageISCSIVolume(ctx context.Context, spec *models.Nod
  		return &csi.NodeStageVolumeResponse{}, nil
  	}
  
@@ -960,7 +965,7 @@ index 2272d79..417be93 100644
  }
  
  func (ns *nodeServer) nodeStageSMBVolume(ctx context.Context, spec *models.NodeStageVolumeSpec, secrets map[string]string) (*csi.NodeStageVolumeResponse, error) {
-@@ -798,6 +874,12 @@ func (ns *nodeServer) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstag
+@@ -798,6 +875,12 @@ func (ns *nodeServer) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstag
  		}
  	}
  
@@ -973,7 +978,7 @@ index 2272d79..417be93 100644
  	k8sVolume, err := ns.dsmService.GetVolume(volumeId)
  	if err != nil {
  		// Claiming the volume is unstaged could leave an iSCSI session logged
-@@ -950,6 +1032,51 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
+@@ -950,6 +1033,51 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
  			return nil, status.Error(codes.Internal, err.Error())
  		}
  	default:
@@ -1025,7 +1030,7 @@ index 2272d79..417be93 100644
  		iscsiDevPaths, iqn, lun, err := ns.loginTarget(volumeId)
  		if err != nil {
  			return nil, status.Error(codes.Internal, err.Error())
-@@ -960,16 +1087,13 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
+@@ -960,16 +1088,13 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
  			return nil, status.Error(codes.Internal, "Can't get volume mount path")
  		}
  
@@ -1046,7 +1051,7 @@ index 2272d79..417be93 100644
  			return nil, status.Error(codes.Internal, err.Error())
  		}
  	}
-@@ -977,6 +1101,137 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
+@@ -977,6 +1102,194 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
  	return &csi.NodePublishVolumeResponse{}, nil
  }
  
@@ -1137,6 +1142,11 @@ index 2272d79..417be93 100644
 +	return k8sVolume, nil
 +}
 +
++// listProcMounts reads the authoritative mount table. Var so tests can
++// substitute a fake mount table without touching the real /proc/mounts on
++// the test host.
++var listProcMounts = mount.ListProcMounts
++
 +// isStillMounted reports whether path carries a live mount right now. The
 +// "likely" fast check cannot see bind mounts of plain directories, so the
 +// authoritative /proc/mounts table decides. Var so tests can point it at a
@@ -1147,7 +1157,7 @@ index 2272d79..417be93 100644
 +	if real, err := filepath.EvalSymlinks(path); err == nil {
 +		path = real
 +	}
-+	mounts, err := mount.ListProcMounts("/proc/mounts")
++	mounts, err := listProcMounts("/proc/mounts")
 +	if err != nil {
 +		return false, err
 +	}
@@ -1162,7 +1172,7 @@ index 2272d79..417be93 100644
 +// stagingMountSource returns the device backing a mounted staging path, per
 +// the authoritative mount table. Var so tests can point it at a fake table.
 +var stagingMountSource = func(path string) (string, bool) {
-+	mounts, err := mount.ListProcMounts("/proc/mounts")
++	mounts, err := listProcMounts("/proc/mounts")
 +	if err != nil {
 +		return "", false
 +	}
@@ -1177,6 +1187,58 @@ index 2272d79..417be93 100644
 +	return "", false
 +}
 +
++// unmountSubMounts tears down every mount that lives strictly below root,
++// deepest first. The kernel refuses to unmount a parent while a child is
++// still attached, so depth-descending order is required for the sweep to
++// make progress on stacked mounts (e.g. Bidirectional-propagated bind
++// mounts from the host's kubelet-dir into a pod volume).
++//
++// Errors from individual Unmount calls are returned immediately: if a
++// sub-mount cannot be released, the parent targetPath removal will fail
++// ENOTEMPTY anyway and we want the caller to surface that instead of
++// silently returning success.
++func unmountSubMounts(ns *nodeServer, root string) error {
++	realRoot, err := filepath.EvalSymlinks(root)
++	if err != nil {
++		// Path vanished between Stat and here — nothing to clean up.
++		return nil
++	}
++	prefix := realRoot + "/"
++
++	mounts, err := listProcMounts("/proc/mounts")
++	if err != nil {
++		return err
++	}
++
++	// Collect every mount whose resolved path is a strict descendant of
++	// root. mp.Path is already resolved by the kernel (it resolves
++	// symlinks at mount time), so a lexical prefix match is correct.
++	var subs []string
++	for _, mp := range mounts {
++		if strings.HasPrefix(mp.Path, prefix) {
++			subs = append(subs, mp.Path)
++		}
++	}
++	if len(subs) == 0 {
++		return nil
++	}
++
++	// Depth-descending: deeper paths first. On a stack like
++	// root/a/b/c -> root/a/b -> root/a, tearing down c first is the only
++	// order the kernel accepts.
++	sort.SliceStable(subs, func(i, j int) bool {
++		return strings.Count(subs[i], "/") > strings.Count(subs[j], "/")
++	})
++
++	for _, p := range subs {
++		log.Infof("NodeUnpublishVolume: unmounting propagated sub-mount %s (under %s)", p, root)
++		if err := ns.Mounter.Interface.Unmount(p); err != nil {
++			return fmt.Errorf("unmount sub-mount %s: %w", p, err)
++		}
++	}
++	return nil
++}
++
 +// maxUnmountPeels bounds the stacked-bind teardown of one call; kubelet
 +// retries NodeUnpublishVolume if layers remain.
 +const maxUnmountPeels = 10
@@ -1184,7 +1246,7 @@ index 2272d79..417be93 100644
  func (ns *nodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublishVolumeRequest) (*csi.NodeUnpublishVolumeResponse, error) {
  	if req.GetVolumeId() == "" { // Not needed, but still a mandatory field
  		return nil, status.Error(codes.InvalidArgument, "Volume ID missing in request")
-@@ -991,25 +1246,42 @@ func (ns *nodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpu
+@@ -991,25 +1304,63 @@ func (ns *nodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpu
  		if os.IsNotExist(err) {
  			return &csi.NodeUnpublishVolumeResponse{}, nil
  		}
@@ -1195,16 +1257,34 @@ index 2272d79..417be93 100644
 -
 -	if err != nil {
 -		return nil, status.Error(codes.Internal, err.Error())
+-	}
+-
+-	if notMount {
+-		return &csi.NodeUnpublishVolumeResponse{}, nil
 +		return nil, status.Errorf(codes.Internal, "%v", err)
  	}
  
--	if notMount {
--		return &csi.NodeUnpublishVolumeResponse{}, nil
+-	if err := ns.Mounter.Interface.Unmount(targetPath); err != nil {
+-		return nil, status.Error(codes.Internal, err.Error())
 +	// The "likely" fast check cannot see bind mounts of plain directories, and
 +	// reporting success on a mount that is still alive is how a migration left
 +	// iSCSI sessions logged in forever: kubelet retries unpublish, never
 +	// reaches unstage, and the next attach is refused Multi-Attach. Peel the
 +	// layers against the authoritative mount table instead.
++	//
++	// Before peeling the main bind mount, sweep any propagated sub-mounts
++	// below targetPath. With Bidirectional mountPropagation (set on the
++	// kubelet-dir host mount in the driver DaemonSet), mounts created inside
++	// the container propagate back to the host and can appear below this
++	// targetPath. isStillMounted only checks the exact path, so those
++	// sub-mounts survived the peel loop, os.Remove below then failed with
++	// ENOTEMPTY, kubelet's pod-dir GC hit the same error, and the pod was
++	// stuck in volumesInUse forever — NodeUnstageVolume (which logs out the
++	// iSCSI session) was never reached.
++	if err := unmountSubMounts(ns, targetPath); err != nil {
++		return nil, status.Errorf(codes.Internal, "Failed to unmount sub-mounts under %s: %v", targetPath, err)
++	}
++
 +	for i := 0; i < maxUnmountPeels; i++ {
 +		mounted, err := isStillMounted(ns.Mounter.Interface, targetPath)
 +		if err != nil {
@@ -1218,22 +1298,27 @@ index 2272d79..417be93 100644
 +		}
  	}
  
--	if err := ns.Mounter.Interface.Unmount(targetPath); err != nil {
--		return nil, status.Error(codes.Internal, err.Error())
+-	if err := os.Remove(targetPath); err != nil {
+-		return nil, status.Errorf(codes.Internal, "Failed to remove target path.")
 +	if mounted, err := isStillMounted(ns.Mounter.Interface, targetPath); err != nil {
 +		return nil, status.Errorf(codes.Internal, "Couldn't check whether %s is mounted: %v", targetPath, err)
 +	} else if mounted {
 +		return nil, status.Errorf(codes.Internal, "%s is still mounted after %d unmount attempts", targetPath, maxUnmountPeels)
- 	}
- 
--	if err := os.Remove(targetPath); err != nil {
--		return nil, status.Errorf(codes.Internal, "Failed to remove target path.")
++	}
++
 +	if err := os.Remove(targetPath); err != nil && !os.IsNotExist(err) {
 +		if errors.Is(err, unix.ENOTEMPTY) || errors.Is(err, unix.EEXIST) {
-+			// The mount is verifiably gone; whatever sits in the directory is
-+			// leftover content for the kubelet's pod-dir GC, not a reason to
-+			// wedge this pod's deletion forever.
-+			log.Infof("NodeUnpublishVolume: %s still has leftover content, leaving it to kubelet GC", targetPath)
++			// The sub-mount sweep above handled every live mount we could
++			// see in /proc/mounts, but leftover non-mount content (stale
++			// files from a container that wrote into a vanished bind mount,
++			// or a sub-mount that raced us) can still block os.Remove.
++			// Fall back to a recursive remove so kubelet can finish
++			// tearing the pod down; returning success without clearing
++			// the directory just re-produces the original deadlock.
++			log.Infof("NodeUnpublishVolume: %s still has leftover content, removing recursively", targetPath)
++			if rmErr := os.RemoveAll(targetPath); rmErr != nil {
++				return nil, status.Errorf(codes.Internal, "Failed to remove leftover content at %s: %v", targetPath, rmErr)
++			}
 +			return &csi.NodeUnpublishVolumeResponse{}, nil
 +		}
 +		return nil, status.Errorf(codes.Internal, "Failed to remove target path: %v", err)
@@ -2022,6 +2107,217 @@ index 0000000..ffc6f42
 +	for _, mp := range fm.MountPoints {
 +		if mp.Path == target {
 +			t.Fatalf("nothing may be bound onto the target: %v", fm.MountPoints)
++		}
++	}
++}
+diff --git a/pkg/driver/nodeserver_unpublish_test.go b/pkg/driver/nodeserver_unpublish_test.go
+new file mode 100644
+index 0000000..5cdfb14
+--- /dev/null
++++ b/pkg/driver/nodeserver_unpublish_test.go
+@@ -0,0 +1,205 @@
++/*
++Copyright 2021 Synology Inc.
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++*/
++
++package driver
++
++import (
++	"context"
++	"os"
++	"path/filepath"
++	"sort"
++	"strings"
++	"testing"
++
++	csi "github.com/container-storage-interface/spec/lib/go/csi"
++	"k8s.io/mount-utils"
++)
++
++// TestNodeUnpublishVolume_CleansSubMounts reproduces the kubelet teardown
++// deadlock: a propagated sub-mount (Bidirectional mountPropagation from the
++// host's kubelet-dir) sits below targetPath. Without the sub-mount sweep,
++// isStillMounted only looks at the exact path, os.Remove fails with ENOTEMPTY,
++// kubelet's pod-dir GC also cannot remove the directory, and NodeUnstageVolume
++// (which logs out the iSCSI session) is never reached.
++func TestNodeUnpublishVolume_CleansSubMounts(t *testing.T) {
++	target := t.TempDir()
++	subdir := filepath.Join(target, "subdir")
++	if err := os.Mkdir(subdir, 0o755); err != nil {
++		t.Fatalf("mkdir subdir: %v", err)
++	}
++
++	// Fake mount table: a propagated bind mount sits below targetPath, plus
++	// the main bind mount on targetPath itself. Mounts are registered in
++	// the FakeMounter so Unmount mutates state; listProcMounts returns the
++	// live view so isStillMounted sees post-Unmount reality.
++	fm := mount.NewFakeMounter([]mount.MountPoint{
++		{Device: "/dev/sda1", Path: target, Opts: []string{"rw", "bind"}},
++		{Device: "/dev/sda1", Path: subdir, Opts: []string{"rw", "bind"}},
++	})
++	listProcMounts = func(string) ([]mount.MountPoint, error) {
++		return fm.List()
++	}
++	defer func() { listProcMounts = mount.ListProcMounts }()
++
++	ns := &nodeServer{Mounter: (&mount.SafeFormatAndMount{Interface: fm})}
++
++	// FakeMounter.Unmount already removes the matching MountPoint from
++	// MountPoints before calling UnmountFunc, so we just record the call
++	// sequence here — touching MountPoints from inside UnmountFunc would
++	// race with the iteration the real Unmount is doing.
++	var unmountCalls []string
++	fm.UnmountFunc = func(target string) error {
++		unmountCalls = append(unmountCalls, target)
++		return nil
++	}
++
++	if _, err := ns.NodeUnpublishVolume(context.Background(), &csi.NodeUnpublishVolumeRequest{VolumeId: "vol-1", TargetPath: target}); err != nil {
++		t.Fatalf("NodeUnpublishVolume: %v", err)
++	}
++
++	// The sub-mount must be unmounted BEFORE the main targetPath.
++	if len(unmountCalls) < 2 {
++		t.Fatalf("expected at least 2 Unmount calls, got %d: %v", len(unmountCalls), unmountCalls)
++	}
++	if unmountCalls[0] != subdir {
++		t.Errorf("first Unmount target = %s, want %s (sub-mount first)", unmountCalls[0], subdir)
++	}
++	if unmountCalls[1] != target {
++		t.Errorf("second Unmount target = %s, want %s (main mount after)", unmountCalls[1], target)
++	}
++
++	// Leftover dir must be gone: kubelet's pod-dir GC would otherwise also
++	// fail and the pod would stay in volumesInUse forever.
++	if _, err := os.Stat(target); !os.IsNotExist(err) {
++		t.Errorf("targetPath %s still exists after NodeUnpublishVolume", target)
++	}
++}
++
++// TestNodeUnpublishVolume_FallsBackToRemoveAll covers the safety net: when
++// leftover content is NOT a live mount (e.g. stale files from a container
++// that wrote into a vanished mount point), the sub-mount sweep unmounts
++// nothing, and the driver must still clear the directory so kubelet can
++// finish teardown.
++func TestNodeUnpublishVolume_FallsBackToRemoveAll(t *testing.T) {
++	target := t.TempDir()
++	// Stale orphan content — not a live mount, just files.
++	if err := os.WriteFile(filepath.Join(target, "stale.txt"), []byte("x"), 0o644); err != nil {
++		t.Fatal(err)
++	}
++	// A deeper nested subdir exercises the depth-sorted sweep too.
++	nested := filepath.Join(target, "a", "b")
++	if err := os.MkdirAll(nested, 0o755); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(nested, "leaf"), []byte("x"), 0o644); err != nil {
++		t.Fatal(err)
++	}
++
++	// Fake mount table: only the top-level bind mount — sub-paths carry no
++	// live mount anymore. Use the FakeMounter's live view so isStillMounted
++	// sees post-Unmount state.
++	fm := mount.NewFakeMounter([]mount.MountPoint{
++		{Device: "/dev/sda1", Path: target, Opts: []string{"rw", "bind"}},
++	})
++	listProcMounts = func(string) ([]mount.MountPoint, error) {
++		return fm.List()
++	}
++	defer func() { listProcMounts = mount.ListProcMounts }()
++
++	ns := &nodeServer{Mounter: (&mount.SafeFormatAndMount{Interface: fm})}
++
++	if _, err := ns.NodeUnpublishVolume(context.Background(), &csi.NodeUnpublishVolumeRequest{VolumeId: "vol-2", TargetPath: target}); err != nil {
++		t.Fatalf("NodeUnpublishVolume: %v", err)
++	}
++	if _, err := os.Stat(target); !os.IsNotExist(err) {
++		t.Errorf("targetPath %s still exists after NodeUnpublishVolume", target)
++	}
++}
++
++// TestUnmountSubMounts_DepthDescending verifies the sweep orders mounts
++// deepest-first, so a stack like /a/b/c is torn down c -> b -> a.
++func TestUnmountSubMounts_DepthDescending(t *testing.T) {
++	target := t.TempDir()
++	c := filepath.Join(target, "a", "b", "c")
++	b := filepath.Join(target, "a", "b")
++	a := filepath.Join(target, "a")
++	for _, d := range []string{a, b, c} {
++		if err := os.MkdirAll(d, 0o755); err != nil {
++			t.Fatal(err)
++		}
++	}
++
++	mounts := []mount.MountPoint{
++		{Path: a},
++		{Path: c},
++		{Path: b},
++	}
++	listProcMounts = func(string) ([]mount.MountPoint, error) { return mounts, nil }
++	defer func() { listProcMounts = mount.ListProcMounts }()
++
++	fm := mount.NewFakeMounter(mounts)
++	var calls []string
++	fm.UnmountFunc = func(target string) error {
++		calls = append(calls, target)
++		return nil
++	}
++	ns := &nodeServer{Mounter: (&mount.SafeFormatAndMount{Interface: fm})}
++
++	if err := unmountSubMounts(ns, target); err != nil {
++		t.Fatalf("unmountSubMounts: %v", err)
++	}
++	want := []string{c, b, a}
++	if len(calls) != len(want) {
++		t.Fatalf("calls = %v, want %v", calls, want)
++	}
++	for i := range want {
++		if calls[i] != want[i] {
++			t.Errorf("call[%d] = %s, want %s", i, calls[i], want[i])
++		}
++	}
++}
++
++// TestSubMountPathsSortedByDepth is a pure unit check on the sort predicate,
++// independent of any mount.Interface wiring.
++func TestSubMountPathsSortedByDepth(t *testing.T) {
++	base := "/var/lib/kubelet/pods/uid/volumes/.../mount"
++	in := []string{
++		base,
++		base + "/a",
++		base + "/a/b/c",
++		base + "/a/b",
++		base + "/z",
++	}
++	got := append([]string(nil), in...)
++	sort.SliceStable(got, func(i, j int) bool {
++		return strings.Count(got[i], "/") > strings.Count(got[j], "/")
++	})
++	want := []string{
++		base + "/a/b/c",
++		base + "/a/b",
++		base + "/a",
++		base + "/z",
++		base,
++	}
++	if len(got) != len(want) {
++		t.Fatalf("len = %d", len(got))
++	}
++	for i := range want {
++		if got[i] != want[i] {
++			t.Errorf("[%d] = %s, want %s", i, got[i], want[i])
 +		}
 +	}
 +}
