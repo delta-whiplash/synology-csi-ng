@@ -1,0 +1,579 @@
+From 6ea976f371da2d2eb9e827c39bd870ba56e1173b Mon Sep 17 00:00:00 2001
+From: DeltaWhiplash <inoushmolabaccus@gmail.com>
+Date: Thu, 22 Oct 2026 13:37:59 +0200
+Subject: [PATCH] =?UTF-8?q?fix(driver):=20NodeUnpublish=20d=C3=A9monte=20a?=
+ =?UTF-8?q?ussi=20via=20la=20vue=20/host?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- sweep des sous-mounts visibles par /host/proc/mounts avant le peel container
+- peelHostAliasMount: <=10 tentatives via l'alias /host, refuses de mentir
+  tant que la vue /host voit encore le mount (EBUSY à chaque rmdir sinon)
+- os.Remove EBUSY: peel + retry remove, succès réel seulement
+- test injecté hostMountsFile: nodeserver_hostview_test.go (6 scénarios)
+---
+ pkg/driver/nodeserver.go               | 167 +++++++++++-
+ pkg/driver/nodeserver_hostview_test.go | 357 +++++++++++++++++++++++++
+ 2 files changed, 523 insertions(+), 1 deletion(-)
+ create mode 100644 pkg/driver/nodeserver_hostview_test.go
+
+diff --git a/pkg/driver/nodeserver.go b/pkg/driver/nodeserver.go
+index 1aeadf3..e416498 100644
+--- a/pkg/driver/nodeserver.go
++++ b/pkg/driver/nodeserver.go
+@@ -1286,6 +1286,142 @@ func unmountSubMounts(ns *nodeServer, root string) error {
+ 	return nil
+ }
+ 
++// The plugin container does not share the host mount namespace. A mount can
++// therefore be alive on the host while the container's own /proc/mounts does
++// not render its kubelet path at all -- observed 2026-10-21, where a pod
++// that died mid-purge left its volume mount in exactly that state: the
++// kubelet kept calling NodeUnpublishVolume on
++// /var/lib/kubelet/pods/<uid>/volumes/.../mount, the container view showed
++// the mount only under the /host bind, every plain unmount was a silent
++// no-op (the path it named was not a mountpoint anywhere the container could
++// see), os.Remove tripped over the live mount with EBUSY and the cleanup
++// loop never converged until the mount was unmounted through its /host
++// alias.
++//
++// The DaemonSet already binds the host root at /host, so the host kernel's
++// own table is readable at /host/proc/mounts and every host path is
++// reachable at /host/<path>. The helpers below use that second view to
++// detect and tear down mounts the container view lost. When the host table
++// cannot be read (deployment without the /host bind, sandbox, transient
++// error) the helpers no-op and the container-only behavior is preserved.
++
++// hostMountsFile is the path from which the host kernel's mount table is
++// read through the DaemonSet's bind of the host root. Empty disables the
++// second view entirely. Var so tests can point it at a fake table.
++var hostMountsFile = "/host/proc/mounts"
++
++// hostRootAlias is the in-container prefix at which the host root is bound.
++var hostRootAlias = "/host"
++
++// hostViewMounts returns the host table read through the /host bind, and
++// whether it was readable at all. Best effort by design: an unreadable host
++// table must never fail paths the container view already handled.
++func hostViewMounts() ([]mount.MountPoint, bool) {
++	if hostMountsFile == "" {
++		return nil, false
++	}
++	mounts, err := listProcMounts(hostMountsFile)
++	if err != nil {
++		return nil, false
++	}
++	return mounts, true
++}
++
++// stillMountedInHostView reports whether the host kernel currently carries a
++// mount at the exact path. The host table records resolved dentry paths, so
++// an exact match against the path kubelet published (the host-side path) is
++// authoritative. ok=false means the host view is unavailable.
++func stillMountedInHostView(path string) (bool, bool) {
++	mounts, ok := hostViewMounts()
++	if !ok {
++		return false, false
++	}
++	for _, mp := range mounts {
++		if mp.Path == path {
++			return true, true
++		}
++	}
++	return false, true
++}
++
++// hostPathAlias returns the in-container path at which a mount living on the
++// host tree is reachable: hostPathAlias("/var/lib/kubelet/u/m") names
++// /host/var/lib/kubelet/u/m inside the container. Unmounting that alias
++// detaches the same mount object the host path names.
++func hostPathAlias(path string) string {
++	return hostRootAlias + path
++}
++
++// unmountHostViewSubMounts tears down, deepest first, every mount the HOST
++// sees strictly below root that the container view does not also list. Same
++// depth-descending contract as unmountSubMounts: the kernel only accepts a
++// parent unmount once every child is gone. Entries the container table
++// already lists are skipped here -- unmounting the same mount through both
++// views is at best redundant, and the container sweep at the call site
++// handles them with their plain paths.
++func unmountHostViewSubMounts(ns *nodeServer, root string) error {
++	mounts, ok := hostViewMounts()
++	if !ok {
++		return nil
++	}
++	container, err := listProcMounts("/proc/mounts")
++	if err != nil {
++		// The container view is unexpectedly unreadable; the host sweep is
++		// still worth running, it just cannot dedupe against it.
++		container = nil
++	}
++	seen := make(map[string]bool, len(container))
++	for _, mp := range container {
++		seen[mp.Path] = true
++	}
++
++	prefix := root + "/"
++	var subs []string
++	for _, mp := range mounts {
++		if strings.HasPrefix(mp.Path, prefix) && !seen[mp.Path] {
++			subs = append(subs, mp.Path)
++		}
++	}
++	sort.SliceStable(subs, func(i, j int) bool {
++		return strings.Count(subs[i], "/") > strings.Count(subs[j], "/")
++	})
++
++	for _, p := range subs {
++		alias := hostPathAlias(p)
++		log.Infof("NodeUnpublishVolume: unmounting host-view sub-mount %s (alias %s, under %s)", p, alias, root)
++		if err := ns.Mounter.Interface.Unmount(alias); err != nil {
++			return fmt.Errorf("unmount host-view sub-mount %s: %w", p, err)
++		}
++	}
++	return nil
++}
++
++// peelHostAliasMount brings a mount down through its /host alias when the
++// host still holds it, regardless of what the container view renders.
++// Bounded like the container peel, and the teardown is verified against the
++// host table itself -- an unmount that did not detach is an error, never a
++// reported success.
++func peelHostAliasMount(ns *nodeServer, targetPath string) error {
++	alias := hostPathAlias(targetPath)
++	for i := 0; i < maxUnmountPeels; i++ {
++		mounted, ok := stillMountedInHostView(targetPath)
++		if !ok || !mounted {
++			return nil
++		}
++		if i == 0 {
++			log.Infof("%s is mounted on the host but hidden from the container view; unmounting via %s", targetPath, alias)
++		}
++		if err := ns.Mounter.Interface.Unmount(alias); err != nil {
++			return fmt.Errorf("failed to unmount %s through %s: %v", targetPath, alias, err)
++		}
++	}
++	if mounted, ok := stillMountedInHostView(targetPath); ok && mounted {
++		return fmt.Errorf("%s is still mounted in the host view after %d alias unmount attempts (%s)",
++			targetPath, maxUnmountPeels, alias)
++	}
++	return nil
++}
++
+ // maxUnmountPeels bounds the stacked-bind teardown of one call; kubelet
+ // retries NodeUnpublishVolume if layers remain.
+ const maxUnmountPeels = 10
+@@ -1326,6 +1462,14 @@ func (ns *nodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpu
+ 		return nil, status.Errorf(codes.Internal, "Failed to unmount sub-mounts under %s: %v", targetPath, err)
+ 	}
+ 
++	// The container view can miss sub-mounts the host still sees (mounts
++	// that never propagated into this plugin pod). Sweep the host table
++	// too, through the /host alias, and skip entries the container sweep
++	// already handled.
++	if err := unmountHostViewSubMounts(ns, targetPath); err != nil {
++		return nil, status.Errorf(codes.Internal, "Failed to unmount host-view sub-mounts under %s: %v", targetPath, err)
++	}
++
+ 	for i := 0; i < maxUnmountPeels; i++ {
+ 		mounted, err := isStillMounted(ns.Mounter.Interface, targetPath)
+ 		if err != nil {
+@@ -1345,8 +1489,29 @@ func (ns *nodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpu
+ 		return nil, status.Errorf(codes.Internal, "%s is still mounted after %d unmount attempts", targetPath, maxUnmountPeels)
+ 	}
+ 
++	// A mount can survive the container-side peel only in the host view: the
++	// container table renders its kubelet path through the /host bind only,
++	// or not at all, so the plain unmounts above were no-ops. Bridge through
++	// the alias and verify against the host table before calling this done.
++	if err := peelHostAliasMount(ns, targetPath); err != nil {
++		return nil, status.Errorf(codes.Internal, "%v", err)
++	}
++
+ 	if err := os.Remove(targetPath); err != nil && !os.IsNotExist(err) {
+-		if errors.Is(err, unix.ENOTEMPTY) || errors.Is(err, unix.EEXIST) {
++		if errors.Is(err, unix.EBUSY) {
++			// The rmdir can trip over a mount the current view does not
++			// render (a dead pod's mount the host still holds). Peel through
++			// the alias once more and retry instead of failing the kubelet
++			// with an error only the next full unpublish could clear.
++			log.Infof("NodeUnpublishVolume: os.Remove %s hit EBUSY, re-peeling through the host view", targetPath)
++			if perr := peelHostAliasMount(ns, targetPath); perr != nil {
++				return nil, status.Errorf(codes.Internal, "Failed to remove target path: %v (and the host-view peel did not clear it: %v)", err, perr)
++			}
++			if rerr := os.Remove(targetPath); rerr != nil && !os.IsNotExist(rerr) {
++				return nil, status.Errorf(codes.Internal, "Failed to remove target path: %v", rerr)
++			}
++			return &csi.NodeUnpublishVolumeResponse{}, nil
++		} else if errors.Is(err, unix.ENOTEMPTY) || errors.Is(err, unix.EEXIST) {
+ 			// The sub-mount sweep above handled every live mount we could
+ 			// see in /proc/mounts, but leftover non-mount content (stale
+ 			// files from a container that wrote into a vanished bind mount,
+diff --git a/pkg/driver/nodeserver_hostview_test.go b/pkg/driver/nodeserver_hostview_test.go
+new file mode 100644
+index 0000000..7f791cf
+--- /dev/null
++++ b/pkg/driver/nodeserver_hostview_test.go
+@@ -0,0 +1,357 @@
++/*
++Copyright 2021 Synology Inc.
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++*/
++
++package driver
++
++import (
++	"context"
++	"fmt"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++
++	csi "github.com/container-storage-interface/spec/lib/go/csi"
++	"k8s.io/mount-utils"
++)
++
++// detachHost keeps a simple mutable host table understood by the tests.
++// Unmounting an alias or a raw path that the table lists (same mount object
++// reached through a different name) removes it -- what the real kernel does.
++func detachHost(tbl *[]mount.MountPoint, requested string) {
++	plain := strings.TrimPrefix(requested, hostRootAlias)
++	kept := (*tbl)[:0]
++	for _, mp := range *tbl {
++		if mp.Path == plain || mp.Path == requested {
++			continue
++		}
++		kept = append(kept, mp)
++	}
++	*tbl = kept
++}
++
++// withHostViewFakes overrides both mount-table seams for one test and
++// restores them afterwards. views("host") backs /host/proc/mounts reads,
++// views("container") backs /proc/mounts reads.
++func withHostViewFakes(t *testing.T, hostFile string, views func(which string) ([]mount.MountPoint, error)) {
++	t.Helper()
++	listProcMounts = func(path string) ([]mount.MountPoint, error) {
++		if path == hostMountsFile {
++			return views("host")
++		}
++		return views("container")
++	}
++	hostMountsFile = hostFile
++	t.Cleanup(func() {
++		listProcMounts = mount.ListProcMounts
++		hostMountsFile = "/host/proc/mounts"
++	})
++}
++
++// TestNodeUnpublishUnmountsThroughHostAlias reproduces the 2026-10-21 zombie:
++// the volume mount is alive on the host and absent from the container's own
++// mount table, so the plain peel was a no-op, os.Remove tripped with EBUSY
++// and kubelet called NodeUnpublishVolume forever. The mount must be
++// unmounted through its /host alias, verified against the host table, and
++// the target path removed.
++func TestNodeUnpublishUnmountsThroughHostAlias(t *testing.T) {
++	target := filepath.Join(t.TempDir(), "pods", "uid-1", "volumes", "kubernetes.io~csi", "pvc-dead", "mount")
++	if err := os.MkdirAll(target, 0o750); err != nil {
++		t.Fatal(err)
++	}
++	hostTable := []mount.MountPoint{{Device: "/dev/sdc", Path: target, Opts: []string{"rw"}}}
++	alias := hostRootAlias + target
++
++	withHostViewFakes(t, "/host/proc/mounts-fake", func(which string) ([]mount.MountPoint, error) {
++		if which == "host" {
++			return hostTable, nil
++		}
++		// The container view is blind: it renders the mount only under the
++		// /host path, which NodeUnpublish never names.
++		return nil, nil
++	})
++
++	fm := mount.NewFakeMounter([]mount.MountPoint{{Device: "/dev/sdc", Path: alias, Opts: []string{"rw"}}})
++	var unmountCalls []string
++	fm.UnmountFunc = func(mounted string) error {
++		unmountCalls = append(unmountCalls, mounted)
++		detachHost(&hostTable, mounted)
++		return nil
++	}
++
++	ns := &nodeServer{Mounter: &mount.SafeFormatAndMount{Interface: fm}}
++	if _, err := ns.NodeUnpublishVolume(context.Background(), &csi.NodeUnpublishVolumeRequest{VolumeId: "vol-1", TargetPath: target}); err != nil {
++		t.Fatalf("NodeUnpublishVolume: %v", err)
++	}
++
++	if len(unmountCalls) != 1 || unmountCalls[0] != alias {
++		t.Fatalf("unmount calls = %v, want exactly the host alias %s", unmountCalls, alias)
++	}
++	if _, err := os.Stat(target); !os.IsNotExist(err) {
++		t.Errorf("targetPath %s still exists after the alias unmount", target)
++	}
++}
++
++// TestNodeUnpublishRefusesWhileHostViewStillMounted mirrors the 0005
++// fail-closed rule on the new view: an unmount that did not detach (kernel
++// keeps the mount alive) is an error, never a success -- kubelet retries,
++// the lie is what wedged volumesInUse forever in the original incident.
++func TestNodeUnpublishRefusesWhileHostViewStillMounted(t *testing.T) {
++	target := filepath.Join(t.TempDir(), "mount")
++	if err := os.MkdirAll(target, 0o750); err != nil {
++		t.Fatal(err)
++	}
++	hostTable := []mount.MountPoint{{Device: "/dev/sdc", Path: target, Opts: []string{"rw"}}}
++
++	withHostViewFakes(t, "/host/proc/mounts-fake", func(which string) ([]mount.MountPoint, error) {
++		if which == "host" {
++			return hostTable, nil
++		}
++		return nil, nil
++	})
++
++	fm := mount.NewFakeMounter([]mount.MountPoint{{Device: "/dev/sdc", Path: hostRootAlias + target, Opts: []string{"rw"}}})
++	var unmountCalls []string
++	fm.UnmountFunc = func(mounted string) error {
++		unmountCalls = append(unmountCalls, mounted)
++		// The kernel refuses to detach this one: both the fake Mounter and
++		// the host table keep the mount alive.
++		fm.MountPoints = append(fm.MountPoints, mount.MountPoint{Device: "/dev/sdc", Path: mounted, Opts: []string{"rw"}})
++		return nil
++	}
++
++	ns := &nodeServer{Mounter: &mount.SafeFormatAndMount{Interface: fm}}
++	_, err := ns.NodeUnpublishVolume(context.Background(), &csi.NodeUnpublishVolumeRequest{VolumeId: "vol-1", TargetPath: target})
++	if err == nil {
++		t.Fatal("NodeUnpublishVolume reported success while the host view still holds the mount")
++	}
++	if !strings.Contains(err.Error(), "still mounted in the host view after") {
++		t.Errorf("error should name the unresolved host view, got: %v", err)
++	}
++	// The peel stays bounded: at least one attempt, never more than the
++	// peel bound (the fake mounter consumed the alias entry on the first
++	// Unmount, so re-attempts happen through its bookkeeping, not the
++	// callback).
++	if len(unmountCalls) < 1 || len(unmountCalls) > maxUnmountPeels {
++		t.Errorf("expected 1..%d bounded alias attempts, got %d (%v)", maxUnmountPeels, len(unmountCalls), unmountCalls)
++	}
++
++	// The target directory must survive: success was not reported, and the
++	// kubelet will keep retrying.
++	if _, statErr := os.Stat(target); statErr != nil {
++		t.Errorf("targetPath must survive a failed unpublish: %v", statErr)
++	}
++}
++
++// TestNodeUnpublishSweepsHostViewSubMounts checks the second view gets the
++// same sub-mount sweep: deepest first, through aliases, before the parent.
++func TestNodeUnpublishSweepsHostViewSubMounts(t *testing.T) {
++	target := filepath.Join(t.TempDir(), "mount")
++	shallow := filepath.Join(target, "a")
++	deep := filepath.Join(target, "a", "b")
++	for _, d := range []string{deep, target} {
++		if err := os.MkdirAll(d, 0o750); err != nil {
++			t.Fatal(err)
++		}
++	}
++	hostTable := []mount.MountPoint{
++		{Device: "/dev/sdd", Path: shallow, Opts: []string{"rw"}},
++		{Device: "/dev/sde", Path: deep, Opts: []string{"rw"}},
++		{Device: "/dev/sdc", Path: target, Opts: []string{"rw"}},
++	}
++
++	withHostViewFakes(t, "/host/proc/mounts-fake", func(which string) ([]mount.MountPoint, error) {
++		if which == "host" {
++			return hostTable, nil
++		}
++		return nil, nil
++	})
++
++	fm := mount.NewFakeMounter([]mount.MountPoint{
++		{Device: "/dev/sde", Path: hostRootAlias + deep, Opts: []string{"rw"}},
++		{Device: "/dev/sdd", Path: hostRootAlias + shallow, Opts: []string{"rw"}},
++		{Device: "/dev/sdc", Path: hostRootAlias + target, Opts: []string{"rw"}},
++	})
++	var unmountCalls []string
++	fm.UnmountFunc = func(mounted string) error {
++		unmountCalls = append(unmountCalls, mounted)
++		detachHost(&hostTable, mounted)
++		return nil
++	}
++
++	ns := &nodeServer{Mounter: &mount.SafeFormatAndMount{Interface: fm}}
++	if _, err := ns.NodeUnpublishVolume(context.Background(), &csi.NodeUnpublishVolumeRequest{VolumeId: "vol-1", TargetPath: target}); err != nil {
++		t.Fatalf("NodeUnpublishVolume: %v", err)
++	}
++
++	want := []string{
++		hostRootAlias + deep,    // deepest first
++		hostRootAlias + shallow, // then the shallow sub-mount
++		hostRootAlias + target,  // then the target itself
++	}
++	if len(unmountCalls) != len(want) {
++		t.Fatalf("unmount calls = %v, want %v", unmountCalls, want)
++	}
++	for i, w := range want {
++		if unmountCalls[i] != w {
++			t.Errorf("call %d = %s, want %s", i, unmountCalls[i], w)
++		}
++	}
++	if _, err := os.Stat(target); !os.IsNotExist(err) {
++		t.Errorf("targetPath %s still exists after the sweep", target)
++	}
++}
++
++// TestNodeUnpublishDedupesSharedSubMounts annotates the case the /host
++// alias patch must not break: a mount visible in BOTH tables is the same
++// mount object -- the container sweep unmounts it once with its plain path
++// and the host sweep must not try to detach it again through the alias.
++func TestNodeUnpublishDedupesSharedSubMounts(t *testing.T) {
++	target := filepath.Join(t.TempDir(), "mount")
++	sub := filepath.Join(target, "sub")
++	if err := os.MkdirAll(sub, 0o750); err != nil {
++		t.Fatal(err)
++	}
++	hostTable := []mount.MountPoint{
++		{Device: "/dev/sda", Path: sub, Opts: []string{"rw"}},
++		{Device: "/dev/sdc", Path: target, Opts: []string{"rw"}},
++	}
++
++	withHostViewFakes(t, "/host/proc/mounts-fake", func(which string) ([]mount.MountPoint, error) {
++		if which == "host" {
++			return hostTable, nil
++		}
++		// The container view sees the same mounts at the same paths.
++		return hostTable, nil
++	})
++
++	fm := mount.NewFakeMounter(hostTable)
++	var unmountCalls []string
++	fm.UnmountFunc = func(mounted string) error {
++		unmountCalls = append(unmountCalls, mounted)
++		detachHost(&hostTable, mounted)
++		return nil
++	}
++
++	ns := &nodeServer{Mounter: &mount.SafeFormatAndMount{Interface: fm}}
++	if _, err := ns.NodeUnpublishVolume(context.Background(), &csi.NodeUnpublishVolumeRequest{VolumeId: "vol-1", TargetPath: target}); err != nil {
++		t.Fatalf("NodeUnpublishVolume: %v", err)
++	}
++
++	var sawAlias bool
++	for _, c := range unmountCalls {
++		if strings.HasPrefix(c, hostRootAlias) {
++			sawAlias = true
++		}
++	}
++	if len(unmountCalls) != 2 || sawAlias {
++		t.Errorf("a mount present in both views must be unmounted once through its plain path "+
++			"(sub first, then target); calls = %v", unmountCalls)
++	}
++	if unmountCalls[0] != sub {
++		t.Errorf("first unmount = %s, want the shared sub-mount %s", unmountCalls[0], sub)
++	}
++}
++
++// TestNodeUnpublishPreservesOldBehaviorWithoutHostTable: a deployment that
++// does not provide the /host bind (or a host table read error) must leave
++// the container-only path working exactly as before.
++func TestNodeUnpublishPreservesOldBehaviorWithoutHostTable(t *testing.T) {
++	target := filepath.Join(t.TempDir(), "mount")
++	if err := os.MkdirAll(target, 0o750); err != nil {
++		t.Fatal(err)
++	}
++
++	fm := mount.NewFakeMounter([]mount.MountPoint{{Device: "/dev/sdc", Path: target, Opts: []string{"rw"}}})
++	withHostViewFakes(t, filepath.Join(t.TempDir(), "absent-mutations"), func(which string) ([]mount.MountPoint, error) {
++		if which == "host" {
++			return nil, fmt.Errorf("/host not bound in this deployment")
++		}
++		// The container view works normally and shows the live table.
++		return fm.List()
++	})
++
++	var unmountCalls []string
++	fm.UnmountFunc = func(mounted string) error {
++		unmountCalls = append(unmountCalls, mounted)
++		return nil
++	}
++
++	ns := &nodeServer{Mounter: &mount.SafeFormatAndMount{Interface: fm}}
++	if _, err := ns.NodeUnpublishVolume(context.Background(), &csi.NodeUnpublishVolumeRequest{VolumeId: "vol-1", TargetPath: target}); err != nil {
++		t.Fatalf("NodeUnpublishVolume: %v", err)
++	}
++	if len(unmountCalls) != 1 || unmountCalls[0] != target {
++		t.Errorf("unmount calls = %v, want the plain container-side unmount only", unmountCalls)
++	}
++}
++
++// TestPeelHostAliasMount verifies the helper in isolation: no-op on a clear
++// or unreadable host view, bounded refusal when the mount survives.
++func TestPeelHostAliasMount(t *testing.T) {
++	t.Run("no-op when host view is clear", func(t *testing.T) {
++		withHostViewFakes(t, "/host/proc/mounts-fake", func(which string) ([]mount.MountPoint, error) {
++			return nil, nil
++		})
++		fm := mount.NewFakeMounter(nil)
++		ns := &nodeServer{Mounter: &mount.SafeFormatAndMount{Interface: fm}}
++		if err := peelHostAliasMount(ns, "/tmp/whatever/mount"); err != nil {
++			t.Errorf("peelHostAliasMount on a clear host view: %v", err)
++		}
++	})
++	t.Run("no-op when host view unreadable", func(t *testing.T) {
++		withHostViewFakes(t, "/host/proc/mounts-absent", func(which string) ([]mount.MountPoint, error) {
++			if which == "host" {
++				return nil, fmt.Errorf("missing")
++			}
++			return nil, nil
++		})
++		fm := mount.NewFakeMounter(nil)
++		ns := &nodeServer{Mounter: &mount.SafeFormatAndMount{Interface: fm}}
++		if err := peelHostAliasMount(ns, "/tmp/whatever/mount"); err != nil {
++			t.Errorf("peelHostAliasMount with an unreadable host table: %v", err)
++		}
++	})
++	t.Run("refuses when the mount survives", func(t *testing.T) {
++		target := filepath.Join(t.TempDir(), "mount")
++		if err := os.MkdirAll(target, 0o750); err != nil {
++			t.Fatal(err)
++		}
++		hostTable := []mount.MountPoint{{Device: "/dev/sdc", Path: target, Opts: []string{"rw"}}}
++		withHostViewFakes(t, "/host/proc/mounts-fake", func(which string) ([]mount.MountPoint, error) {
++			if which == "host" {
++				return hostTable, nil
++			}
++			return nil, nil
++		})
++		fm := mount.NewFakeMounter([]mount.MountPoint{{Device: "/dev/sdc", Path: hostRootAlias + target, Opts: []string{"rw"}}})
++		calls := 0
++		fm.UnmountFunc = func(string) error {
++			calls++
++			// Surviving mount: the fake kernel keeps it in place.
++			fm.MountPoints = append(fm.MountPoints, mount.MountPoint{Device: "/dev/sdc", Path: hostRootAlias + target, Opts: []string{"rw"}})
++			return nil
++		}
++		ns := &nodeServer{Mounter: &mount.SafeFormatAndMount{Interface: fm}}
++		err := peelHostAliasMount(ns, target)
++		if err == nil || !strings.Contains(err.Error(), "still mounted in the host view") {
++			t.Errorf("want refusal for a surviving mount, got %v", err)
++		}
++		if calls < 1 || calls > maxUnmountPeels {
++			t.Errorf("calls = %d, want 1..%d", calls, maxUnmountPeels)
++		}
++	})
++}
+-- 
+2.56.0
+
